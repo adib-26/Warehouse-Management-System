@@ -19,7 +19,7 @@ Designed for efficient product management with a clean UI and robust API.
 
 ## Setup Instructions
 
-### 1. Clone the repository
+### Clone the repository
 ```bash
 git clone https://github.com/adib-26/Warehouse-Management-System.git
 cd Warehouse-Management-System
