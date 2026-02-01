@@ -77,24 +77,7 @@ npm install
 npm run dev
 ```
 
-###Project Structure
-
-Warehouse-Management-System/
-├── backend/
-│   ├── main.py
-│   ├── requirements.txt
-│   └── Dockerfile
-├── frontend/
-│   ├── src/
-│   │   └── Products.jsx
-│   ├── package.json
-│   ├── vite.config.js
-│   └── Dockerfile
-├── docker-compose.yml
-├── README.md
-
 <img width="716" height="573" alt="Screenshot 2026-01-24 at 1 40 55 AM" src="https://github.com/user-attachments/assets/b3aa2057-76fa-44b1-883f-f94a413ef4f9" />
-
 
 
 
