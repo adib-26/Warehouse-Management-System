@@ -1,3 +1,25 @@
+Directory structure:
+└── adib-26-warehouse-management-system/
+    ├── README.md
+    ├── backend/
+    │   ├── Dockerfile
+    │   ├── main.py
+    │   └── requirements.txt
+    └── frontend/
+        └── src/
+            ├── Sidebar.jsx
+            └── pages/
+                ├── Activity.jsx
+                ├── Dashboard.jsx
+                ├── Products.jsx
+                └── Stock.jsx
+
+
+Files Content:
+
+================================================
+FILE: README.md
+================================================
 # Warehouse Management System
 
 A modern inventory dashboard built with React (Vite + TailwindCSS) on the frontend and FastAPI + SQLite on the backend.  
@@ -73,3 +95,22 @@ Warehouse-Management-System/
 
 <img width="716" height="573" alt="Screenshot 2026-01-24 at 1 40 55 AM" src="https://github.com/user-attachments/assets/b3aa2057-76fa-44b1-883f-f94a413ef4f9" />
 
+
+
+
+================================================
+FILE: backend/Dockerfile
+================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY . .
+
+# Run FastAPI with Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
