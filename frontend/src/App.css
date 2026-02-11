@@ -1,0 +1,138 @@
+:root{
+  --max-width: 1280px;
+  --page-padding: 2rem;
+  --logo-size-min: 3.5rem;
+  --logo-size-preferred: 6rem;
+  --logo-size-max: 8rem;
+  --logo-padding: 1.5rem;
+  --glow-default: 0 0 2em #646cffaa;
+  --glow-react: 0 0 2em #61dafbaa;
+  --transition-fast: 200ms;
+  --transition-medium: 300ms;
+  --card-padding: 2rem;
+  --muted: #888;
+  --card-radius: 10px;
+  --card-elevation: 0 6px 18px rgba(10, 10, 20, 0.06);
+
+  /* Surface / theme tokens (added so cards and surfaces don't force white) */
+  --bg-dark: #0b1220;
+  --bg-surface-dark: #0f1724;
+  --text-dark: #e6eef6;
+
+  --bg-light: #ffffff;
+  --bg-surface-light: #f7fafc;
+  --text-light: #0f1724;
+}
+
+/* Layout container */
+#root{
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: var(--page-padding);
+  text-align: center;
+  box-sizing: border-box;
+  background: var(--bg-dark);
+  color: var(--text-dark);
+}
+
+/* Respect light mode if the project uses prefers-color-scheme */
+@media (prefers-color-scheme: light) {
+  #root {
+    background: var(--bg-light);
+    color: var(--text-light);
+  }
+}
+
+/* Logo: responsive, accessible, and performant */
+.logo{
+  height: clamp(var(--logo-size-min), var(--logo-size-preferred), var(--logo-size-max));
+  padding: var(--logo-padding);
+  display: inline-block;
+  vertical-align: middle;
+  will-change: transform;
+  transition: transform var(--transition-fast) ease, filter var(--transition-medium) ease;
+  filter: drop-shadow(0 0 0 transparent);
+  outline: none;
+  border-radius: 8px;
+  background: transparent;
+}
+
+/* Hover and keyboard focus states */
+.logo:hover,
+.logo:focus-visible{
+  transform: translateZ(0) scale(1.035);
+  filter: drop-shadow(var(--glow-default));
+}
+
+/* Variant for React logo */
+.logo.react:hover,
+.logo.react:focus-visible{
+  filter: drop-shadow(var(--glow-react));
+}
+
+/* Respect user preference for reduced motion */
+@media (prefers-reduced-motion: reduce){
+  .logo{
+    transition: none;
+    transform: none;
+    animation: none !important;
+  }
+}
+
+/* Spin animation defined but applied only when allowed */
+@keyframes logo-spin{
+  from{ transform: rotate(0deg); }
+  to{ transform: rotate(360deg); }
+}
+
+/* Apply spin only when user allows motion and element is not decorative */
+@media (prefers-reduced-motion: no-preference){
+  a:nth-of-type(2) .logo:not([aria-hidden="true"]){
+    animation: logo-spin 20s linear infinite;
+    will-change: transform;
+  }
+}
+
+/* Card and text styles
+   Changed to use theme surface tokens instead of forcing near-white.
+   Cards will be dark-surface in dark mode and light-surface in light mode.
+*/
+.card{
+  padding: var(--card-padding);
+  box-shadow: var(--card-elevation);
+  border-radius: var(--card-radius);
+  background: var(--bg-surface-dark);
+  color: var(--text-dark);
+  margin: 1rem auto;
+  max-width: 900px;
+  text-align: left;
+}
+
+/* Light mode card variant */
+@media (prefers-color-scheme: light) {
+  .card {
+    background: var(--bg-surface-light);
+    color: var(--text-light);
+  }
+}
+
+/* Muted helper text */
+.read-the-docs{
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin-top: 0.5rem;
+}
+
+/* Accessibility niceties */
+a:focus-visible{
+  outline: 3px solid Highlight;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* Small responsive tweaks */
+@media (max-width: 520px){
+  :root{ --page-padding: 1rem; }
+  .card{ padding: 1rem; }
+  .logo{ height: clamp(2.5rem, 5.5rem, 6.5rem); }
+}
