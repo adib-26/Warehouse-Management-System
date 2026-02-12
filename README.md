@@ -1,12 +1,29 @@
 Directory structure:
 └── adib-26-warehouse-management-system/
     ├── README.md
+    ├── docker-compose.yml
+    ├── Dockerfile
+    ├── package.json
+    ├── requirements.txt
     ├── backend/
     │   ├── Dockerfile
     │   ├── main.py
     │   └── requirements.txt
     └── frontend/
+        ├── README.md
+        ├── Dockerfile
+        ├── eslint.config.js
+        ├── index.html
+        ├── package.json
+        ├── postcss.config.js
+        ├── tailwind.config.js
+        ├── vite.config.js
         └── src/
+            ├── App.css
+            ├── App.jsx
+            ├── ErrorBoundary.jsx
+            ├── index.css
+            ├── main.jsx
             ├── Sidebar.jsx
             └── pages/
                 ├── Activity.jsx
