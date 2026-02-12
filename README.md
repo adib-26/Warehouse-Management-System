@@ -1,5 +1,5 @@
 Directory structure:
-"""
+'''
 └── adib-26-warehouse-management-system/
     ├── README.md
     ├── docker-compose.yml
@@ -31,7 +31,7 @@ Directory structure:
                 ├── Dashboard.jsx
                 ├── Products.jsx
                 └── Stock.jsx
-                """
+                '''
 
 
 Files Content:
