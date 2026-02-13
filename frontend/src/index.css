@@ -111,6 +111,7 @@ main {
   border-radius: calc(var(--ui-radius) + 2px);
   background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
   justify-content: space-between;
+  will-change: transform, opacity;
 }
 .brand {
   display: flex;
@@ -128,6 +129,8 @@ main {
   place-items: center;
   color: white;
   font-weight: 800;
+  position: relative;
+  overflow: hidden;
 }
 
 /* Sidebar */
@@ -137,6 +140,7 @@ main {
   border-radius: calc(var(--ui-radius) + 2px);
   min-height: 320px;
   box-shadow: var(--elevation-1);
+  will-change: transform, opacity;
 }
 
 /* Ensure sidebar text adapts in light mode */
@@ -172,6 +176,7 @@ main {
   box-shadow: var(--elevation-1);
   transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease;
   color: inherit;
+  will-change: transform, box-shadow, opacity;
 }
 
 /* Lighter card variant for light mode */
@@ -255,4 +260,141 @@ h2 { font-size: 1.25rem; margin: 0 0 var(--space-2) 0; }
   :root { --page-max-width: 100%; }
   .container { padding-left: var(--space-3); padding-right: var(--space-3); }
   .brand .logo { width: 36px; height: 36px; }
+}
+
+/* ------------------ New animations (replace previous set) ------------------ */
+
+/* Keyframes: new set */
+@keyframes riseAndFade {
+  0% { opacity: 0; transform: translateY(12px) scale(0.995); }
+  60% { opacity: 1; transform: translateY(-4px) scale(1.01); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes logoRotatePulse {
+  0% { transform: rotate(-6deg) scale(0.98); filter: brightness(0.98); }
+  50% { transform: rotate(6deg) scale(1.02); filter: brightness(1.02); }
+  100% { transform: rotate(-6deg) scale(0.98); filter: brightness(0.98); }
+}
+
+@keyframes sidebarFloatIn {
+  0% { opacity: 0; transform: translateX(-14px) rotate(-1deg); }
+  100% { opacity: 1; transform: translateX(0) rotate(0); }
+}
+
+@keyframes cardPulseBorder {
+  0% { box-shadow: 0 6px 18px rgba(2,6,23,0.06); border-color: transparent; }
+  50% { box-shadow: 0 10px 28px rgba(37,99,235,0.06); border-color: rgba(37,99,235,0.06); }
+  100% { box-shadow: 0 6px 18px rgba(2,6,23,0.06); border-color: transparent; }
+}
+
+@keyframes subtleWave {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+  100% { transform: translateY(0); }
+}
+
+@keyframes shimmerSweep {
+  0% { left: -140%; opacity: 0.9; }
+  50% { opacity: 1; }
+  100% { left: 140%; opacity: 0.9; }
+}
+
+@keyframes drawStroke { to { stroke-dashoffset: 0; } }
+
+/* Apply a slow, calm animated background (very subtle) */
+body {
+  background-image:
+    radial-gradient(900px 420px at 8% 12%, rgba(96,165,250,0.015), transparent 8%),
+    radial-gradient(700px 320px at 92% 88%, rgba(99,102,241,0.01), transparent 12%),
+    linear-gradient(180deg, transparent, rgba(0,0,0,0.01));
+  background-size: 220% 220%, 220% 220%, 100% 100%;
+  animation: subtleWave 28s ease-in-out infinite;
+}
+
+/* Entrance: container and header */
+.container { animation: riseAndFade 520ms cubic-bezier(.2,.9,.2,1) both; }
+.header { animation: riseAndFade 520ms cubic-bezier(.2,.9,.2,1) both; }
+
+/* Logo: gentle rotating pulse (very slow) */
+.brand .logo {
+  transform-origin: center;
+  animation: logoRotatePulse 6s ease-in-out infinite;
+}
+
+/* Sidebar: float-in with a tiny delay */
+.sidebar {
+  animation: sidebarFloatIn 420ms cubic-bezier(.2,.9,.2,1) both;
+}
+
+/* Cards: staggered rise + subtle border pulse on hover focus */
+.card {
+  animation: riseAndFade 420ms cubic-bezier(.2,.9,.2,1) both;
+  border: 1px solid transparent;
+}
+.card:hover, .card:focus-within {
+  animation: none;
+  animation-name: none;
+  box-shadow: 0 18px 40px rgba(2,6,23,0.10);
+  animation: cardPulseBorder 1200ms ease-in-out;
+}
+
+/* Staggered appearance for immediate children cards inside main content */
+.main-content > .card:nth-child(1) { animation-delay: 60ms; }
+.main-content > .card:nth-child(2) { animation-delay: 140ms; }
+.main-content > .card:nth-child(3) { animation-delay: 220ms; }
+.main-content > .card:nth-child(4) { animation-delay: 300ms; }
+
+/* If cards are nested inside a grid or container, provide a generic stagger using nth-of-type */
+.card:nth-of-type(1) { animation-delay: 40ms; }
+.card:nth-of-type(2) { animation-delay: 120ms; }
+.card:nth-of-type(3) { animation-delay: 200ms; }
+.card:nth-of-type(4) { animation-delay: 280ms; }
+
+/* Logo shimmer sweep (pseudo element) */
+.brand .logo::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -140%;
+  width: 36%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+  transform: skewX(-18deg);
+  animation: shimmerSweep 1.8s linear infinite;
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+
+/* Small pop for muted text and labels */
+.muted, .brand span { animation: riseAndFade 420ms cubic-bezier(.2,.9,.2,1) both; }
+
+/* PageFallback skeleton: softer shimmer */
+.card > div > div > div,
+.card > div > div > div + div,
+.card > div > div > div + div + div {
+  background: linear-gradient(90deg, rgba(255,255,255,0.01) 0%, rgba(255,255,255,0.03) 50%, rgba(255,255,255,0.01) 100%);
+  background-size: 220% 100%;
+  animation: shimmerSweep 1.4s linear infinite;
+}
+
+/* Sparkline draw helper */
+.sparkline polyline, .sparkline path {
+  stroke-dasharray: 260;
+  stroke-dashoffset: 260;
+  animation: drawStroke 900ms ease forwards 120ms;
+}
+
+/* Nav item micro-interaction refinement */
+.nav-item { transition: transform var(--transition-fast) ease, background var(--transition-fast) ease, box-shadow var(--transition-fast) ease; }
+.nav-item:hover { transform: translateY(-3px); box-shadow: 0 8px 18px rgba(2,6,23,0.06); }
+
+/* Respect reduced motion preference: disable all animations and keep transitions minimal */
+@media (prefers-reduced-motion: reduce) {
+  body { animation: none !important; background-image: none !important; }
+  .container, .header, .sidebar, .card, .brand .logo, .brand .logo::after, .muted, .sparkline polyline {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
 }
