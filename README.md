@@ -97,7 +97,8 @@ npm install
 npm run dev
 ```
 
-<img width="799" height="762" alt="Screenshot 2026-02-11 at 11 41 36 PM" src="https://github.com/user-attachments/assets/31ef111d-ca6b-458f-ae7b-4b25880ca588" />
+
+<img width="797" height="746" alt="Screenshot 2026-02-13 at 11 46 32 PM" src="https://github.com/user-attachments/assets/8e087684-77a5-4b1e-8861-ec604c4d6c54" />
 
 
 ================================================
