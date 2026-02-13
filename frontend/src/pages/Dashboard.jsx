@@ -242,7 +242,7 @@ export default function Dashboard() {
       {/* Chart / trend card */}
       <div className="card" style={{ padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-          <h2 style={{ margin: 0, fontSize: "1rem" }}>Stock Trend</h2>
+          <h2 style={{ margin: 0, fontSize: "1rem" }}>Equity Trend</h2>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Last 30 days</div>
         </div>
 
