@@ -1,119 +1,236 @@
-Directory structure:
+# 📦 Warehouse Management System
+
+A modern full-stack inventory management dashboard built with:
+
+*  **React (Vite + TailwindCSS)** – Frontend
+*  **FastAPI** – Backend API
+*  **SQLite** – Database
+*  **Docker & Docker Compose** – Containerized deployment
+
+Designed for efficient product tracking with a clean UI and scalable backend architecture.
+
+---
+
+## 🚀 Features
+
+*  Search products by Name or SKU
+*  Add new products
+*  Update product details
+*  Delete products
+*  Responsive dashboard UI
+*  Category & stock quantity tracking
+*  High-performance FastAPI REST API
+*  Fully Dockerized setup
+
+---
+
+## 🏗️ Project Structure
+
 ```
-└── adib-26-warehouse-management-system/
+adib-26-warehouse-management-system/
+│
+├── README.md
+├── docker-compose.yml
+├── Dockerfile
+├── package.json
+├── requirements.txt
+│
+├── backend/
+│   ├── Dockerfile
+│   ├── main.py
+│   └── requirements.txt
+│
+└── frontend/
     ├── README.md
-    ├── docker-compose.yml
     ├── Dockerfile
+    ├── eslint.config.js
+    ├── index.html
     ├── package.json
-    ├── requirements.txt
-    ├── backend/
-    │   ├── Dockerfile
-    │   ├── main.py
-    │   └── requirements.txt
-    └── frontend/
-        ├── README.md
-        ├── Dockerfile
-        ├── eslint.config.js
-        ├── index.html
-        ├── package.json
-        ├── postcss.config.js
-        ├── tailwind.config.js
-        ├── vite.config.js
-        └── src/
-            ├── App.css
-            ├── App.jsx
-            ├── ErrorBoundary.jsx
-            ├── index.css
-            ├── main.jsx
-            ├── Sidebar.jsx
-            └── pages/
-                ├── Activity.jsx
-                ├── Dashboard.jsx
-                ├── Products.jsx
-                └── Stock.jsx
-
+    ├── postcss.config.js
+    ├── tailwind.config.js
+    ├── vite.config.js
+    └── src/
+        ├── App.css
+        ├── App.jsx
+        ├── ErrorBoundary.jsx
+        ├── index.css
+        ├── main.jsx
+        ├── Sidebar.jsx
+        └── pages/
+            ├── Activity.jsx
+            ├── Dashboard.jsx
+            ├── Products.jsx
+            └── Stock.jsx
 ```
 
+---
 
-Files Content:
+## 🧠 Architecture Overview
 
-================================================
-FILE: README.md
-================================================
-# Warehouse Management System
+```
+Frontend (React + Vite + Tailwind)
+        ↓
+FastAPI Backend (REST API)
+        ↓
+SQLite Database
+```
 
-A modern inventory dashboard built with React (Vite + TailwindCSS) on the frontend and FastAPI + SQLite on the backend.  
-Designed for efficient product management with a clean UI and robust API.
+The frontend communicates with FastAPI via HTTP REST endpoints.
+FastAPI manages CRUD operations and persists data in SQLite.
 
-## Features
-- Search products by name or SKU
-- Add, update, and delete products
-- Responsive product table with category and quantity
-- FastAPI backend with REST endpoints
-- Tailwind-powered frontend for modern UI
-- SQLite database integration
+---
 
-## Tech Stack
+## ⚙️ Tech Stack
 
-| Layer            | Technology                |
-|------------------|---------------------------|
-| Frontend         | React, Vite, TailwindCSS  |
-| Backend          | FastAPI (Python)          |
-| Database         | SQLite                    |
-| Version Control  | Git + GitHub              |
-| Containerization | Docker + Docker Compose   |
+| Layer            | Technology     |
+| ---------------- | -------------- |
+| Frontend         | React + Vite   |
+| Styling          | TailwindCSS    |
+| Backend          | FastAPI        |
+| Database         | SQLite         |
+| Dev Server       | Uvicorn        |
+| Containerization | Docker         |
+| Orchestration    | Docker Compose |
+| Linting          | ESLint         |
 
-## Setup Instructions
+---
 
-### Clone the repository
+## 🐳 Docker Setup (Recommended)
+
+### 1️⃣ Clone Repository
+
 ```bash
 git clone https://github.com/adib-26/Warehouse-Management-System.git
 cd Warehouse-Management-System
 ```
-### Option 1: Run with Docker (Recommended)
 
-Make sure Docker Desktop is running.
+### 2️⃣ Build & Run Containers
 
 ```bash
 docker compose up --build
 ```
-### Option 2: Manual Setup
 
-## Backend (FastAPI)
+### 3️⃣ Access the Application
+
+Frontend:
+
+```
+http://localhost:5173
+```
+
+Backend API:
+
+```
+http://localhost:8000
+```
+
+FastAPI Docs:
+
+```
+http://localhost:8000/docs
+```
+
+---
+
+## 🖥️ Manual Setup (Without Docker)
+
+---
+
+### 🔹 Backend Setup (FastAPI)
+
 ```bash
 cd backend
+
 python -m venv .venv
-source .venv/bin/activate   # Mac/Linux
-.venv\Scripts\activate      # Windows
+
+# Mac/Linux
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
 
 pip install -r requirements.txt
+
 uvicorn main:app --reload --port 8000
 ```
 
-## Frontend (React + Vite)
+---
+
+### 🔹 Frontend Setup (React + Vite)
+
 ```bash
 cd frontend
+
 npm install
 npm run dev
 ```
 
+Then open:
 
-<img width="797" height="746" alt="Screenshot 2026-02-13 at 11 46 32 PM" src="https://github.com/user-attachments/assets/8e087684-77a5-4b1e-8861-ec604c4d6c54" />
+```
+http://localhost:5173
+```
+
+---
+
+## 📡 API Endpoints (Example)
+
+| Method | Endpoint         | Description           |
+| ------ | ---------------- | --------------------- |
+| GET    | `/products`      | Retrieve all products |
+| GET    | `/products/{id}` | Get product by ID     |
+| POST   | `/products`      | Create new product    |
+| PUT    | `/products/{id}` | Update product        |
+| DELETE | `/products/{id}` | Delete product        |
+
+Full interactive documentation available at:
+
+```
+/docs
+```
+
+---
+
+## 📊 UI Pages
+
+| Page      | Description             |
+| --------- | ----------------------- |
+| Dashboard | Overview of inventory   |
+| Products  | Manage all products     |
+| Stock     | Stock tracking          |
+| Activity  | Inventory activity logs |
+
+---
+
+## 🖼️ Application Preview
+
+<img width="797" height="746" alt="Warehouse Dashboard Screenshot" src="https://github.com/user-attachments/assets/8e087684-77a5-4b1e-8861-ec604c4d6c54" />
+
+---
+
+## 🔒 Production Notes
+
+* SQLite is suitable for small-to-medium deployments
+* For production-scale apps, consider PostgreSQL
+* Use environment variables for production configs
+* Enable CORS properly if deploying separately
+
+---
+
+## 🚀 Future Improvements
+
+* JWT Authentication
+* Role-based access control
+* Inventory analytics dashboard
+* Export reports (CSV/PDF)
+* PostgreSQL support
+* CI/CD pipeline
+
+---
+
+## 👨‍💻 Author
+
+Mahbub
+Warehouse Management System
 
 
-================================================
-FILE: backend/Dockerfile
-================================================
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy backend code
-COPY . .
-
-# Run FastAPI with Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
