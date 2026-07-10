@@ -11,8 +11,8 @@ export default function Stock() {
   const [recentMovements, setRecentMovements] = useState([]);
 
   const refreshData = () => {
-    fetch(`${API}/products`).then((r) => r.json()).then(setProducts).catch(() => {});
-    fetch(`${API}/history?limit=10`).then((r) => r.json()).then(setRecentMovements).catch(() => {});
+    fetch(`${API}/products`).then(r => r.json()).then(setProducts).catch(() => {});
+    fetch(`${API}/history?limit=10`).then(r => r.json()).then(setRecentMovements).catch(() => {});
   };
 
   useEffect(() => { refreshData(); }, []);
@@ -57,142 +57,148 @@ export default function Stock() {
     }
   };
 
-  const selectedProduct = products.find((p) => p.sku === selectedSku);
+  const selectedProduct = products.find(p => p.sku === selectedSku);
   const isLow = selectedProduct && selectedProduct.quantity <= selectedProduct.low_stock;
 
   return (
     <section>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div className="page-header">
         <div>
-          <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Stock Adjustment</h1>
-          <p className="muted" style={{ margin: "4px 0 0 0" }}>Add or remove stock from products</p>
+          <h1 className="page-title">Stock Adjustment</h1>
+          <p className="page-subtitle">Add or remove stock from products</p>
         </div>
-        <button className="btn btn-sm btn-ghost" onClick={undo} title="Undo last movement">
-          ↩ Undo
+        <button className="btn btn-ghost btn-sm" onClick={undo}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+          Undo Last
         </button>
       </div>
 
       {message && (
-        <div className="card" style={{
-          padding: 12,
-          marginBottom: 16,
-          borderLeft: `4px solid ${message.type === "error" ? "#ef4444" : message.type === "warning" ? "#fbbf24" : "#34d399"}`,
-        }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>{message.text}</span>
-            <button className="btn btn-sm btn-ghost" style={{ padding: "2px 8px" }} onClick={() => setMessage(null)}>✕</button>
-          </div>
+        <div className={`alert alert-${message.type === "error" ? "error" : message.type === "warning" ? "warning" : "success"}`} style={{ marginBottom: 20 }}>
+          <span>{message.text}</span>
+          <button className="btn btn-ghost btn-xs" style={{ padding: "2px 8px" }} onClick={() => setMessage(null)}>&times;</button>
         </div>
       )}
 
-      <div className="card" style={{ padding: 20, marginBottom: 16 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
-          <div>
-            <label className="muted" style={{ display: "block", marginBottom: 4 }}>Product</label>
-            <select
-              className="select"
-              value={selectedSku}
-              onChange={(e) => setSelectedSku(e.target.value)}
-              style={{ width: "100%" }}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-body">
+          <h3 className="section-title">Adjust Stock</h3>
+          <div className="form-grid" style={{ marginBottom: 16 }}>
+            <div className="input-group">
+              <label className="input-label">Product *</label>
+              <select
+                className="select"
+                value={selectedSku}
+                onChange={e => setSelectedSku(e.target.value)}
+              >
+                <option value="">Select a product...</option>
+                {products.map(p => (
+                  <option key={p.sku} value={p.sku} disabled={p.archived}>
+                    {p.name} ({p.sku}) — {p.quantity} in stock
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="input-group">
+              <label className="input-label">Adjustment (+/-) *</label>
+              <input
+                className="input"
+                type="number"
+                placeholder="e.g. +10 or -5"
+                value={delta}
+                onChange={e => setDelta(Number(e.target.value))}
+              />
+            </div>
+            <div className="input-group">
+              <label className="input-label">Reason</label>
+              <input
+                className="input"
+                placeholder="e.g. received, sold, damaged"
+                value={reason}
+                onChange={e => setReason(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {selectedProduct && (
+            <div style={{
+              padding: "14px 18px",
+              borderRadius: "var(--radius-sm)",
+              background: isLow ? "var(--red-bg)" : "var(--green-bg)",
+              border: `1px solid ${isLow ? "rgba(239, 68, 68, 0.15)" : "rgba(16, 185, 129, 0.15)"}`,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 16,
+            }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{selectedProduct.name}</div>
+                <div className="muted" style={{ fontSize: "0.8rem" }}>SKU: {selectedProduct.sku}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ color: "var(--muted)", fontSize: "0.8125rem" }}>Current:</span>
+                <span style={{ fontWeight: 700, fontSize: "1.125rem", color: isLow ? "var(--red)" : "var(--green)" }}>
+                  {selectedProduct.quantity}
+                </span>
+                {isLow && <span className="badge badge-danger">Low stock</span>}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={adjust}
+              disabled={!selectedSku || delta === 0}
+              style={delta < 0 ? { background: "var(--red)", boxShadow: "0 2px 8px rgba(239, 68, 68, 0.3)" } : {}}
             >
-              <option value="">Select a product...</option>
-              {products.map((p) => (
-                <option key={p.sku} value={p.sku} disabled={p.archived}>
-                  {p.name} ({p.sku}) — {p.quantity} in stock
-                </option>
-              ))}
-            </select>
+              {delta >= 0 ? "Receive Stock" : "Remove Stock"}
+            </button>
           </div>
-          <div>
-            <label className="muted" style={{ display: "block", marginBottom: 4 }}>Adjustment</label>
-            <input
-              className="input"
-              type="number"
-              placeholder="+ or - quantity"
-              value={delta}
-              onChange={(e) => setDelta(Number(e.target.value))}
-              style={{ width: "100%" }}
-            />
-          </div>
-          <div>
-            <label className="muted" style={{ display: "block", marginBottom: 4 }}>Reason</label>
-            <input
-              className="input"
-              placeholder="e.g. received, sold, damaged"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              style={{ width: "100%" }}
-            />
-          </div>
-        </div>
-
-        {selectedProduct && (
-          <div style={{
-            marginTop: 12,
-            padding: "8px 12px",
-            borderRadius: 8,
-            background: isLow ? "rgba(239, 68, 68, 0.1)" : "rgba(52, 211, 153, 0.1)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}>
-            <div>
-              <strong>{selectedProduct.name}</strong>
-              <span className="muted" style={{ marginLeft: 8 }}>SKU: {selectedProduct.sku}</span>
-            </div>
-            <div>
-              Current stock: <strong style={{ color: isLow ? "#ef4444" : "#34d399" }}>{selectedProduct.quantity}</strong>
-              {isLow && <span className="badge badge-danger" style={{ marginLeft: 8 }}>Low stock</span>}
-            </div>
-          </div>
-        )}
-
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
-          <button
-            className="btn btn-sm"
-            onClick={adjust}
-            disabled={!selectedSku || delta === 0}
-            style={{ background: delta < 0 ? "#dc2626" : undefined }}
-          >
-            {delta >= 0 ? "Receive Stock" : "Remove Stock"}
-          </button>
         </div>
       </div>
 
-      <div className="card" style={{ padding: 16 }}>
-        <h2 style={{ margin: "0 0 12px 0", fontSize: "1rem" }}>Recent Movements</h2>
-        {recentMovements.length === 0 ? (
-          <p className="muted">No recent movements</p>
-        ) : (
-          <div style={{ display: "grid", gap: 8 }}>
-            {recentMovements.map((m, i) => (
-              <div key={i} style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "8px 12px",
-                borderRadius: 8,
-                background: "color-mix(in srgb, var(--text-dark) 3%, transparent)",
-                fontSize: "0.9rem",
-              }}>
-                <div>
-                  <strong>{m.name}</strong>
-                  <span className="muted" style={{ marginLeft: 8 }}>{m.sku}</span>
+      <div className="card">
+        <div className="card-body">
+          <h3 className="section-title">Recent Movements</h3>
+          {recentMovements.length === 0 ? (
+            <div className="empty-state" style={{ padding: 24 }}>
+              <div className="empty-state-text">No recent movements</div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 8 }}>
+              {recentMovements.map((m, i) => (
+                <div key={i} style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "12px 16px",
+                  borderRadius: "var(--radius-sm)",
+                  background: "var(--bg-surface-elevated)",
+                  fontSize: "0.875rem",
+                }}>
+                  <div>
+                    <span style={{ fontWeight: 600 }}>{m.name}</span>
+                    <span className="muted" style={{ marginLeft: 8, fontSize: "0.8rem" }}>{m.sku}</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                    <span style={{
+                      fontWeight: 700,
+                      fontSize: "0.9375rem",
+                      color: m.delta > 0 ? "var(--green)" : m.delta < 0 ? "var(--red)" : "var(--text-secondary)",
+                    }}>
+                      {m.delta > 0 ? "+" : ""}{m.delta}
+                    </span>
+                    <span className="badge badge-neutral" style={{ fontSize: "0.7rem" }}>{m.action_type}</span>
+                    <span className="muted" style={{ fontSize: "0.75rem", whiteSpace: "nowrap" }}>
+                      {m.created_at ? new Date(m.created_at + "Z").toLocaleDateString() : ""}
+                    </span>
+                  </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{
-                    fontWeight: 700,
-                    color: m.delta > 0 ? "#34d399" : m.delta < 0 ? "#ef4444" : "inherit",
-                  }}>
-                    {m.delta > 0 ? "+" : ""}{m.delta}
-                  </span>
-                  <span className="muted" style={{ fontSize: "0.8rem" }}>{m.action_type}</span>
-                  <span className="muted" style={{ fontSize: "0.8rem" }}>{m.created_at}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );

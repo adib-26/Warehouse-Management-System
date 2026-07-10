@@ -29,77 +29,72 @@ export default function Dashboard() {
 
   return (
     <section>
-      <header style={{ marginBottom: 20 }}>
-        <h1 style={{ margin: 0, fontSize: "1.5rem" }}>Dashboard Overview</h1>
-        <p className="muted" style={{ margin: "4px 0 0 0" }}>Snapshot of your inventory</p>
-      </header>
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-subtitle">Overview of your warehouse inventory</p>
+        </div>
+      </div>
 
       {stats && (
-        <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", marginBottom: 20 }}>
-          <div className="card" style={{ padding: 18, borderTop: "3px solid #60a5fa" }}>
-            <div className="muted" style={{ fontSize: "0.85rem" }}>Total Products</div>
-            <div style={{ fontSize: "1.8rem", fontWeight: 700, marginTop: 4 }}>{stats.total_products}</div>
+        <div className="grid-auto" style={{ marginBottom: 24 }}>
+          <div className="card stat-card" style={{ borderTopColor: "var(--blue)" }}>
+            <div className="stat-label">Total Products</div>
+            <div className="stat-value">{stats.total_products}</div>
           </div>
-          <div className="card" style={{ padding: 18, borderTop: "3px solid #34d399" }}>
-            <div className="muted" style={{ fontSize: "0.85rem" }}>Total Stock</div>
-            <div style={{ fontSize: "1.8rem", fontWeight: 700, marginTop: 4 }}>{stats.total_stock}</div>
+          <div className="card stat-card" style={{ borderTopColor: "var(--green)" }}>
+            <div className="stat-label">Total Stock Units</div>
+            <div className="stat-value">{stats.total_stock}</div>
           </div>
-          <div className="card" style={{ padding: 18, borderTop: `3px solid ${stats.low_stock_count > 0 ? "#ef4444" : "#34d399"}` }}>
-            <div className="muted" style={{ fontSize: "0.85rem" }}>Low Stock Items</div>
-            <div style={{
-              fontSize: "1.8rem",
-              fontWeight: 700,
-              marginTop: 4,
-              color: stats.low_stock_count > 0 ? "#ef4444" : "inherit",
-            }}>
+          <div className="card stat-card" style={{ borderTopColor: stats.low_stock_count > 0 ? "var(--red)" : "var(--green)" }}>
+            <div className="stat-label">Low Stock Items</div>
+            <div className="stat-value" style={{ color: stats.low_stock_count > 0 ? "var(--red)" : "inherit" }}>
               {stats.low_stock_count}
             </div>
             {stats.low_stock_count > 0 && (
-              <button
-                className="btn btn-sm"
-                style={{ marginTop: 8, fontSize: "0.8rem" }}
-                onClick={() => navigate("/products?low_stock=true")}
-              >
+              <button className="btn btn-danger btn-xs" style={{ marginTop: 8 }} onClick={() => navigate("/products?low_stock=true")}>
                 View items
               </button>
             )}
           </div>
-          <div className="card" style={{ padding: 18, borderTop: "3px solid #fbbf24" }}>
-            <div className="muted" style={{ fontSize: "0.85rem" }}>Activity (7 days)</div>
-            <div style={{ fontSize: "1.8rem", fontWeight: 700, marginTop: 4 }}>{stats.recent_activity}</div>
+          <div className="card stat-card" style={{ borderTopColor: "var(--yellow)" }}>
+            <div className="stat-label">Activity (7 days)</div>
+            <div className="stat-value">{stats.recent_activity}</div>
           </div>
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <div>
-          <div className="card" style={{ padding: 16 }}>
-            <h2 style={{ margin: "0 0 12px 0", fontSize: "1rem" }}>Low Stock Alerts</h2>
+      <div className="grid-2">
+        <div className="card">
+          <div className="card-body">
+            <h3 className="section-title">Low Stock Alerts</h3>
             {lowStock.length === 0 ? (
-              <p className="muted">All products are adequately stocked</p>
+              <div className="empty-state" style={{ padding: 24 }}>
+                <div className="empty-state-text">All products are adequately stocked</div>
+              </div>
             ) : (
-              <div style={{ display: "grid", gap: 6 }}>
-                {lowStock.slice(0, 5).map((p) => (
+              <div style={{ display: "grid", gap: 8 }}>
+                {lowStock.slice(0, 5).map(p => (
                   <div key={p.id} style={{
                     display: "flex",
                     justifyContent: "space-between",
                     alignItems: "center",
-                    padding: "8px 10px",
-                    borderRadius: 8,
-                    background: "rgba(239, 68, 68, 0.08)",
-                    fontSize: "0.9rem",
+                    padding: "12px 14px",
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--red-bg)",
+                    border: "1px solid rgba(239, 68, 68, 0.15)",
                   }}>
                     <div>
-                      <strong>{p.name}</strong>
-                      <span className="muted" style={{ marginLeft: 6, fontSize: "0.8rem" }}>{p.sku}</span>
+                      <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>{p.name}</div>
+                      <div className="muted" style={{ fontSize: "0.75rem" }}>{p.sku}</div>
                     </div>
-                    <div style={{ fontWeight: 700, color: "#ef4444" }}>
+                    <div style={{ fontWeight: 700, color: "var(--red)", fontSize: "0.9375rem" }}>
                       {p.quantity} / {p.low_stock}
                     </div>
                   </div>
                 ))}
                 {lowStock.length > 5 && (
-                  <button className="btn btn-sm btn-ghost" onClick={() => navigate("/products?low_stock=true")}>
+                  <button className="btn btn-ghost btn-xs" onClick={() => navigate("/products?low_stock=true")}>
                     View all {lowStock.length} low stock items
                   </button>
                 )}
@@ -108,11 +103,13 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div>
-          <div className="card" style={{ padding: 16 }}>
-            <h2 style={{ margin: "0 0 12px 0", fontSize: "1rem" }}>Recent Activity</h2>
+        <div className="card">
+          <div className="card-body">
+            <h3 className="section-title">Recent Activity</h3>
             {recentActivity.length === 0 ? (
-              <p className="muted">No recent activity</p>
+              <div className="empty-state" style={{ padding: 24 }}>
+                <div className="empty-state-text">No recent activity</div>
+              </div>
             ) : (
               <div style={{ display: "grid", gap: 6 }}>
                 {recentActivity.map((a, i) => (
@@ -120,22 +117,22 @@ export default function Dashboard() {
                     display: "flex",
                     justifyContent: "space-between",
                     alignItems: "center",
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    background: "color-mix(in srgb, var(--text-dark) 3%, transparent)",
-                    fontSize: "0.85rem",
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--bg-surface-elevated)",
+                    fontSize: "0.875rem",
                   }}>
                     <div>
-                      <strong>{a.name}</strong>
-                      <span className="muted" style={{ marginLeft: 6 }}>{a.action_type}</span>
+                      <span style={{ fontWeight: 600 }}>{a.name}</span>
+                      <span className="muted" style={{ marginLeft: 8, fontSize: "0.8rem" }}>{a.action_type}</span>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       {a.delta !== 0 && (
-                        <span style={{ fontWeight: 600, color: a.delta > 0 ? "#34d399" : "#ef4444" }}>
+                        <span style={{ fontWeight: 700, color: a.delta > 0 ? "var(--green)" : "var(--red)", fontSize: "0.8125rem" }}>
                           {a.delta > 0 ? "+" : ""}{a.delta}
                         </span>
                       )}
-                      <span className="muted" style={{ fontSize: "0.75rem" }}>
+                      <span className="muted" style={{ fontSize: "0.75rem", whiteSpace: "nowrap" }}>
                         {a.created_at ? new Date(a.created_at + "Z").toLocaleDateString() : ""}
                       </span>
                     </div>
@@ -144,8 +141,8 @@ export default function Dashboard() {
               </div>
             )}
             <button
-              className="btn btn-sm btn-ghost"
-              style={{ marginTop: 8 }}
+              className="btn btn-ghost btn-xs"
+              style={{ marginTop: 12 }}
               onClick={() => navigate("/activity")}
             >
               View full activity log
