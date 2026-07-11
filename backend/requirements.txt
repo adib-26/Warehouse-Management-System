@@ -3,3 +3,5 @@ uvicorn==0.39.0
 pydantic==2.12.5
 python-multipart==0.0.20
 openpyxl==3.1.5
+PyJWT==2.10.1
+bcrypt==4.3.0

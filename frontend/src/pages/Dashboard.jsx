@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
-const API = "http://localhost:8000";
+import { authFetch } from "../api";
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -13,9 +12,9 @@ export default function Dashboard() {
     const load = async () => {
       try {
         const [statsRes, lowRes, histRes] = await Promise.all([
-          fetch(`${API}/history/stats`),
-          fetch(`${API}/products/low-stock`),
-          fetch(`${API}/history?limit=10`),
+          authFetch(`/history/stats`),
+          authFetch(`/products/low-stock`),
+          authFetch(`/history?limit=10`),
         ]);
         setStats(await statsRes.json());
         setLowStock(await lowRes.json());

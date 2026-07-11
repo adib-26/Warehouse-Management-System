@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import init_db
-from routes import products, stock, history, suppliers, inbound, attachments
+from routes import products, stock, history, suppliers, inbound, attachments, customers, outbound, auth, admin
 import os
 
 app = FastAPI(title="NovaLedger WMS API", version="3.0.0")
@@ -20,6 +20,11 @@ app.include_router(history.router, prefix="/history", tags=["History"])
 app.include_router(suppliers.router, prefix="/suppliers", tags=["Suppliers"])
 app.include_router(inbound.router, prefix="/inbound", tags=["Inbound"])
 app.include_router(attachments.router, prefix="/attachments", tags=["Attachments"])
+app.include_router(customers.router, prefix="/customers", tags=["Customers"])
+app.include_router(outbound.router, prefix="/outbound", tags=["Outbound"])
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
+app.include_router(admin.router, prefix="/admin", tags=["Admin"])
+app.include_router(admin.audit_router, prefix="/audit", tags=["Audit"])
 
 
 @app.on_event("startup")

@@ -1,49 +1,122 @@
-import { HomeIcon, CubeIcon, ArchiveBoxIcon, ClipboardDocumentListIcon, TruckIcon, ArrowDownTrayIcon } from "@heroicons/react/24/outline";
+import {
+  HomeIcon,
+  CubeIcon,
+  ArchiveBoxIcon,
+  ClipboardDocumentListIcon,
+  TruckIcon,
+  ArrowDownTrayIcon,
+  ArrowUpTrayIcon,
+  UserGroupIcon,
+  UsersIcon,
+  ShieldCheckIcon,
+  DocumentMagnifyingGlassIcon,
+  ArrowRightStartOnRectangleIcon,
+} from "@heroicons/react/24/outline";
 import { NavLink } from "react-router-dom";
+import { useAuth } from "./AuthContext";
 
 export default function Sidebar() {
+  const { user, can, logout } = useAuth();
   const linkClasses = ({ isActive }) => `nav-item ${isActive ? "active" : ""}`;
+  const iconStyle = { width: 18, height: 18 };
 
   return (
     <nav aria-label="Primary navigation" style={{ display: "flex", flexDirection: "column" }}>
-      <div className="sidebar-section">
-        <div className="sidebar-label">Overview</div>
-        <NavLink to="/dashboard" className={linkClasses}>
-          <HomeIcon style={{ width: 18, height: 18 }} />
-          <span>Dashboard</span>
-        </NavLink>
-      </div>
+      {can("reports", "read") && (
+        <div className="sidebar-section">
+          <div className="sidebar-label">Overview</div>
+          <NavLink to="/dashboard" className={linkClasses}>
+            <HomeIcon style={iconStyle} />
+            <span>Dashboard</span>
+          </NavLink>
+        </div>
+      )}
 
-      <div className="sidebar-section">
-        <div className="sidebar-label">Inventory</div>
-        <NavLink to="/products" className={linkClasses}>
-          <CubeIcon style={{ width: 18, height: 18 }} />
-          <span>Products</span>
-        </NavLink>
-        <NavLink to="/stock" className={linkClasses}>
-          <ArchiveBoxIcon style={{ width: 18, height: 18 }} />
-          <span>Stock Adjust</span>
-        </NavLink>
-      </div>
+      {(can("products", "read") || can("stock", "read")) && (
+        <div className="sidebar-section">
+          <div className="sidebar-label">Inventory</div>
+          {can("products", "read") && (
+            <NavLink to="/products" className={linkClasses}>
+              <CubeIcon style={iconStyle} />
+              <span>Products</span>
+            </NavLink>
+          )}
+          {can("stock", "read") && (
+            <NavLink to="/stock" className={linkClasses}>
+              <ArchiveBoxIcon style={iconStyle} />
+              <span>Stock Adjust</span>
+            </NavLink>
+          )}
+        </div>
+      )}
 
-      <div className="sidebar-section">
-        <div className="sidebar-label">Supply Chain</div>
-        <NavLink to="/inbound" className={linkClasses}>
-          <ArrowDownTrayIcon style={{ width: 18, height: 18 }} />
-          <span>Inbound</span>
-        </NavLink>
-        <NavLink to="/suppliers" className={linkClasses}>
-          <TruckIcon style={{ width: 18, height: 18 }} />
-          <span>Suppliers</span>
-        </NavLink>
-      </div>
+      {(can("inbound", "read") || can("outbound", "read") || can("suppliers", "read") || can("customers", "read")) && (
+        <div className="sidebar-section">
+          <div className="sidebar-label">Supply Chain</div>
+          {can("inbound", "read") && (
+            <NavLink to="/inbound" className={linkClasses}>
+              <ArrowDownTrayIcon style={iconStyle} />
+              <span>Inbound</span>
+            </NavLink>
+          )}
+          {can("outbound", "read") && (
+            <NavLink to="/outbound" className={linkClasses}>
+              <ArrowUpTrayIcon style={iconStyle} />
+              <span>Outbound</span>
+            </NavLink>
+          )}
+          {can("suppliers", "read") && (
+            <NavLink to="/suppliers" className={linkClasses}>
+              <TruckIcon style={iconStyle} />
+              <span>Suppliers</span>
+            </NavLink>
+          )}
+          {can("customers", "read") && (
+            <NavLink to="/customers" className={linkClasses}>
+              <UserGroupIcon style={iconStyle} />
+              <span>Customers</span>
+            </NavLink>
+          )}
+        </div>
+      )}
 
-      <div className="sidebar-section">
-        <div className="sidebar-label">Reports</div>
-        <NavLink to="/activity" className={linkClasses}>
-          <ClipboardDocumentListIcon style={{ width: 18, height: 18 }} />
-          <span>Activity Log</span>
-        </NavLink>
+      {can("reports", "read") && (
+        <div className="sidebar-section">
+          <div className="sidebar-label">Reports</div>
+          <NavLink to="/activity" className={linkClasses}>
+            <ClipboardDocumentListIcon style={iconStyle} />
+            <span>Activity Log</span>
+          </NavLink>
+          <NavLink to="/audit" className={linkClasses}>
+            <DocumentMagnifyingGlassIcon style={iconStyle} />
+            <span>Audit Log</span>
+          </NavLink>
+        </div>
+      )}
+
+      {can("admin", "read") && (
+        <div className="sidebar-section">
+          <div className="sidebar-label">Administration</div>
+          <NavLink to="/users" className={linkClasses}>
+            <UsersIcon style={iconStyle} />
+            <span>Users</span>
+          </NavLink>
+          <NavLink to="/permissions" className={linkClasses}>
+            <ShieldCheckIcon style={iconStyle} />
+            <span>Permissions</span>
+          </NavLink>
+        </div>
+      )}
+
+      <div className="sidebar-section" style={{ marginTop: "auto", borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+        <div style={{ padding: "4px 12px 10px" }}>
+          <div style={{ fontWeight: 600, fontSize: "0.8125rem" }}>{user?.full_name || user?.username}</div>
+          <div className="muted" style={{ fontSize: "0.7rem", textTransform: "capitalize" }}>{user?.role}</div>
+        </div>
+        <button className="nav-item" onClick={logout} style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+          <ArrowRightStartOnRectangleIcon style={iconStyle} />
+          <span>Sign Out</span>
+        </button>
       </div>
 
       <style>{`

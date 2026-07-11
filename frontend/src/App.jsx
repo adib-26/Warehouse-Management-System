@@ -2,6 +2,8 @@ import React, { Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import ErrorBoundary from "./ErrorBoundary";
+import { AuthProvider, useAuth } from "./AuthContext";
+import Login from "./pages/Login";
 
 const Dashboard = React.lazy(() => import("./pages/Dashboard"));
 const Products = React.lazy(() => import("./pages/Products"));
@@ -9,6 +11,11 @@ const Stock = React.lazy(() => import("./pages/Stock"));
 const Activity = React.lazy(() => import("./pages/Activity"));
 const Suppliers = React.lazy(() => import("./pages/Suppliers"));
 const Inbound = React.lazy(() => import("./pages/Inbound"));
+const Outbound = React.lazy(() => import("./pages/Outbound"));
+const Customers = React.lazy(() => import("./pages/Customers"));
+const Users = React.lazy(() => import("./pages/Users"));
+const Permissions = React.lazy(() => import("./pages/Permissions"));
+const AuditLog = React.lazy(() => import("./pages/AuditLog"));
 
 function PageFallback() {
   return (
@@ -23,7 +30,24 @@ function PageFallback() {
   );
 }
 
-export default function App() {
+function AppShell() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div className="spinner" />
+          <span className="muted">Loading...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login />;
+  }
+
   return (
     <div className="container">
       <header style={{
@@ -77,12 +101,18 @@ export default function App() {
             <Suspense fallback={<PageFallback />}>
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="/login" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/products" element={<Products />} />
                 <Route path="/stock" element={<Stock />} />
                 <Route path="/inbound" element={<Inbound />} />
+                <Route path="/outbound" element={<Outbound />} />
                 <Route path="/suppliers" element={<Suppliers />} />
+                <Route path="/customers" element={<Customers />} />
                 <Route path="/activity" element={<Activity />} />
+                <Route path="/users" element={<Users />} />
+                <Route path="/permissions" element={<Permissions />} />
+                <Route path="/audit" element={<AuditLog />} />
                 <Route path="*" element={
                   <div className="card">
                     <div className="card-body empty-state">
@@ -97,5 +127,13 @@ export default function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppShell />
+    </AuthProvider>
   );
 }

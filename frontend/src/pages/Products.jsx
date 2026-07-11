@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-
-const API = "http://localhost:8000";
+import { authFetch } from "../api";
+import { useAuth } from "../AuthContext";
 
 function Dialog({ open, onClose, title, children }) {
   if (!open) return null;
@@ -18,6 +18,7 @@ function Dialog({ open, onClose, title, children }) {
 }
 
 export default function Products() {
+  const { can } = useAuth();
   const [items, setItems] = useState([]);
   const [q, setQ] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
@@ -41,7 +42,7 @@ export default function Products() {
   };
 
   const load = () => {
-    fetch(`${API}/products?${getParams()}`).then(r => r.json()).then(setItems).catch(() => {});
+    authFetch(`/products?${getParams()}`).then(r => r.json()).then(setItems).catch(() => {});
   };
 
   useEffect(() => { load(); }, []);
@@ -51,7 +52,7 @@ export default function Products() {
   const addProduct = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API}/products`, {
+      const res = await authFetch(`/products`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newProduct),
@@ -73,7 +74,7 @@ export default function Products() {
   const updateProduct = async () => {
     if (!editingProduct) return;
     try {
-      const res = await fetch(`${API}/products/${editingProduct.id}`, {
+      const res = await authFetch(`/products/${editingProduct.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editingProduct),
@@ -94,7 +95,7 @@ export default function Products() {
   const deleteProduct = async (id, name) => {
     if (!confirm(`Delete "${name}"?`)) return;
     try {
-      await fetch(`${API}/products/${id}`, { method: "DELETE" });
+      await authFetch(`/products/${id}`, { method: "DELETE" });
       load();
       showDialog("Product deleted", `${name} has been removed.`);
     } catch {
@@ -104,7 +105,7 @@ export default function Products() {
 
   const toggleArchive = async (id) => {
     try {
-      await fetch(`${API}/products/${id}/archive`, { method: "PATCH" });
+      await authFetch(`/products/${id}/archive`, { method: "PATCH" });
       load();
     } catch {
       showDialog("Error", "Could not toggle archive status.", "error");
@@ -122,7 +123,7 @@ export default function Products() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${API}/products/bulk-upload`, { method: "POST", body: formData });
+      const res = await authFetch(`/products/bulk-upload`, { method: "POST", body: formData });
       const data = await res.json();
       showDialog(
         "Upload complete",
@@ -146,16 +147,18 @@ export default function Products() {
           <h1 className="page-title">Products</h1>
           <p className="page-subtitle">Manage your inventory catalog</p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-            Upload CSV/XLSX
-            <input type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleFileUpload(e.target.files[0])} />
-          </label>
-          <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>
-            {showAddForm ? "Cancel" : "+ Add Product"}
-          </button>
-        </div>
+        {can("products", "write") && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+              Upload CSV/XLSX
+              <input type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleFileUpload(e.target.files[0])} />
+            </label>
+            <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>
+              {showAddForm ? "Cancel" : "+ Add Product"}
+            </button>
+          </div>
+        )}
       </div>
 
       {uploading && (
@@ -297,9 +300,15 @@ export default function Products() {
                     </td>
                     <td style={{ textAlign: "right" }}>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        <button className="btn btn-ghost btn-xs" onClick={() => setEditingProduct({ ...p })}>Edit</button>
-                        <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p.id)}>{p.archived ? "Unarchive" : "Archive"}</button>
-                        <button className="btn btn-danger btn-xs" onClick={() => deleteProduct(p.id, p.name)}>Delete</button>
+                        {can("products", "write") && (
+                          <>
+                            <button className="btn btn-ghost btn-xs" onClick={() => setEditingProduct({ ...p })}>Edit</button>
+                            <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p.id)}>{p.archived ? "Unarchive" : "Archive"}</button>
+                          </>
+                        )}
+                        {can("products", "delete") && (
+                          <button className="btn btn-danger btn-xs" onClick={() => deleteProduct(p.id, p.name)}>Delete</button>
+                        )}
                       </div>
                     </td>
                   </tr>

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-
-const API = "http://localhost:8000";
+import { authFetch } from "../api";
+import { useAuth } from "../AuthContext";
 
 export default function Stock() {
+  const { can } = useAuth();
   const [products, setProducts] = useState([]);
   const [selectedSku, setSelectedSku] = useState("");
   const [delta, setDelta] = useState(0);
@@ -11,8 +12,8 @@ export default function Stock() {
   const [recentMovements, setRecentMovements] = useState([]);
 
   const refreshData = () => {
-    fetch(`${API}/products`).then(r => r.json()).then(setProducts).catch(() => {});
-    fetch(`${API}/history?limit=10`).then(r => r.json()).then(setRecentMovements).catch(() => {});
+    authFetch(`/products`).then(r => r.json()).then(setProducts).catch(() => {});
+    authFetch(`/history?limit=10`).then(r => r.json()).then(setRecentMovements).catch(() => {});
   };
 
   useEffect(() => { refreshData(); }, []);
@@ -20,7 +21,7 @@ export default function Stock() {
   const adjust = async () => {
     if (!selectedSku || delta === 0) return;
     try {
-      const res = await fetch(`${API}/stock`, {
+      const res = await authFetch(`/stock`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sku: selectedSku, delta: Number(delta), reason }),
@@ -44,7 +45,7 @@ export default function Stock() {
 
   const undo = async () => {
     try {
-      const res = await fetch(`${API}/stock/undo`, { method: "POST" });
+      const res = await authFetch(`/stock/undo`, { method: "POST" });
       if (res.ok) {
         setMessage({ type: "success", text: "Last movement undone" });
         refreshData();
@@ -67,10 +68,12 @@ export default function Stock() {
           <h1 className="page-title">Stock Adjustment</h1>
           <p className="page-subtitle">Add or remove stock from products</p>
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={undo}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
-          Undo Last
-        </button>
+        {can("stock", "write") && (
+          <button className="btn btn-ghost btn-sm" onClick={undo}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+            Undo Last
+          </button>
+        )}
       </div>
 
       {message && (
@@ -80,6 +83,7 @@ export default function Stock() {
         </div>
       )}
 
+      {can("stock", "write") && (
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-body">
           <h3 className="section-title">Adjust Stock</h3>
@@ -157,6 +161,7 @@ export default function Stock() {
           </div>
         </div>
       </div>
+      )}
 
       <div className="card">
         <div className="card-body">
