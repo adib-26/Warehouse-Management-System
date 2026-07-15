@@ -1,149 +1,177 @@
-# 📦 Warehouse Management System
+# NovaLedger
 
-A modern full-stack inventory management dashboard built with:
+A full-stack Warehouse Management System built with modern web technologies to streamline inventory operations, stock movements, supplier management, customer management, and warehouse workflows.
 
-*  **React (Vite + TailwindCSS)** – Frontend
-*  **FastAPI** – Backend API
-*  **SQLite** – Database
-*  **Docker & Docker Compose** – Containerized deployment
+## Overview
 
-Designed for efficient product tracking with a clean UI and scalable backend architecture.
+NovaLedger is designed for organizations that require secure and efficient inventory management. The system provides role-based access control, product management, shipment tracking, stock adjustments, audit logging, and administrative controls within a modern web application.
+
+## Features
+
+* JWT authentication with secure password hashing using bcrypt
+* Role-based access control (Admin, Manager, Operator)
+* Configurable permission matrix for each module
+* Complete audit trail for user and system activities
+* Product catalog with search, filtering, archiving, and low-stock monitoring
+* Bulk product import using CSV and Excel files
+* Stock adjustment with undo functionality
+* Inbound shipment management
+* Outbound shipment management
+* Supplier management
+* Customer management
+* File attachment support for shipment documents
+* Dashboard with inventory statistics and recent activities
+* User and permission management
+* Docker support for simplified deployment
 
 ---
 
-## 🚀 Features
+# Project Structure
 
-*  Search products by Name or SKU
-*  Add new products
-*  Update product details
-*  Delete products
-*  Responsive dashboard UI
-*  Category & stock quantity tracking
-*  High-performance FastAPI REST API
-*  Fully Dockerized setup
-
----
-
-## 🏗️ Project Structure
-
-```
-adib-26-warehouse-management-system/
+```text
+PythonProject/
 │
 ├── README.md
 ├── docker-compose.yml
-├── Dockerfile
-├── package.json
-├── requirements.txt
 │
 ├── backend/
 │   ├── Dockerfile
 │   ├── main.py
-│   └── requirements.txt
+│   ├── database.py
+│   ├── security.py
+│   ├── schemas.py
+│   ├── requirements.txt
+│   └── routes/
+│       ├── auth.py
+│       ├── admin.py
+│       ├── products.py
+│       ├── stock.py
+│       ├── history.py
+│       ├── suppliers.py
+│       ├── customers.py
+│       ├── inbound.py
+│       ├── outbound.py
+│       └── attachments.py
 │
 └── frontend/
-    ├── README.md
     ├── Dockerfile
-    ├── eslint.config.js
-    ├── index.html
     ├── package.json
-    ├── postcss.config.js
-    ├── tailwind.config.js
     ├── vite.config.js
+    ├── tailwind.config.js
     └── src/
-        ├── App.css
         ├── App.jsx
-        ├── ErrorBoundary.jsx
-        ├── index.css
-        ├── main.jsx
+        ├── api.js
         ├── Sidebar.jsx
+        ├── AuthContext.jsx
+        ├── main.jsx
         └── pages/
-            ├── Activity.jsx
+            ├── Login.jsx
             ├── Dashboard.jsx
             ├── Products.jsx
-            └── Stock.jsx
+            ├── Stock.jsx
+            ├── Inbound.jsx
+            ├── Outbound.jsx
+            ├── Suppliers.jsx
+            ├── Customers.jsx
+            ├── Activity.jsx
+            ├── Users.jsx
+            ├── Permissions.jsx
+            └── AuditLog.jsx
 ```
 
 ---
 
-## 🧠 Architecture Overview
+# System Architecture
 
-```
-Frontend (React + Vite + Tailwind)
-        ↓
-FastAPI Backend (REST API)
-        ↓
+```text
+React + Vite + TailwindCSS
+            │
+            │ JWT Authentication
+            ▼
+FastAPI REST API
+            │
+            ▼
 SQLite Database
 ```
 
-The frontend communicates with FastAPI via HTTP REST endpoints.
-FastAPI manages CRUD operations and persists data in SQLite.
+The frontend authenticates users through the backend using JWT. Every protected request includes a bearer token that is validated before access is granted. Permissions are enforced according to the user's assigned role, while all significant actions are recorded in the audit log.
 
 ---
 
-## ⚙️ Tech Stack
+# Technology Stack
 
-| Layer            | Technology     |
-| ---------------- | -------------- |
-| Frontend         | React + Vite   |
-| Styling          | TailwindCSS    |
-| Backend          | FastAPI        |
-| Database         | SQLite         |
-| Dev Server       | Uvicorn        |
-| Containerization | Docker         |
-| Orchestration    | Docker Compose |
-| Linting          | ESLint         |
+| Component        | Technology                 |
+| ---------------- | -------------------------- |
+| Frontend         | React 19, Vite             |
+| Styling          | Tailwind CSS               |
+| Routing          | React Router 7             |
+| Backend          | FastAPI                    |
+| Authentication   | JWT, bcrypt                |
+| Database         | SQLite                     |
+| File Processing  | python-multipart, openpyxl |
+| Server           | Uvicorn                    |
+| Containerization | Docker                     |
+| Orchestration    | Docker Compose             |
+| Linting          | ESLint                     |
 
 ---
 
-## 🐳 Docker Setup (Recommended)
+# User Roles
 
-### 1️⃣ Clone Repository
+| Role     | Permissions                                                            |
+| -------- | ---------------------------------------------------------------------- |
+| Admin    | Full access to all modules and administrative functions                |
+| Manager  | Read and write access to operational modules without delete privileges |
+| Operator | Inventory operations with read-only access to selected modules         |
+
+Default administrator credentials:
+
+```text
+Username: admin
+Password: admin123
+```
+
+For production deployments, change the default password immediately.
+
+---
+
+# Installation
+
+## Docker Installation
+
+Clone the repository.
 
 ```bash
 git clone https://github.com/adib-26/Warehouse-Management-System.git
 cd Warehouse-Management-System
 ```
 
-### 2️⃣ Build & Run Containers
+Build and start the application.
 
 ```bash
 docker compose up --build
 ```
 
-### 3️⃣ Access the Application
+Access the application:
 
-Frontend:
-
-```
-http://localhost:5173
-```
-
-Backend API:
-
-```
-http://localhost:8000
-```
-
-FastAPI Docs:
-
-```
-http://localhost:8000/docs
-```
+| Service           | URL                        |
+| ----------------- | -------------------------- |
+| Frontend          | http://localhost:5173      |
+| Backend           | http://localhost:8000      |
+| API Documentation | http://localhost:8000/docs |
 
 ---
 
-## 🖥️ Manual Setup (Without Docker)
+## Manual Installation
 
----
-
-### 🔹 Backend Setup (FastAPI)
+### Backend
 
 ```bash
 cd backend
 
 python -m venv .venv
 
-# Mac/Linux
+# Linux / macOS
 source .venv/bin/activate
 
 # Windows
@@ -154,83 +182,142 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
----
+Optional environment variable:
 
-### 🔹 Frontend Setup (React + Vite)
+```bash
+export SECRET_KEY="your-secret-key"
+```
+
+Windows:
+
+```bash
+set SECRET_KEY=your-secret-key
+```
+
+### Frontend
 
 ```bash
 cd frontend
 
 npm install
+
 npm run dev
 ```
 
-Then open:
+Open:
 
-```
+```text
 http://localhost:5173
 ```
 
 ---
 
-## 📡 API Endpoints (Example)
+# API Overview
 
-| Method | Endpoint         | Description           |
-| ------ | ---------------- | --------------------- |
-| GET    | `/products`      | Retrieve all products |
-| GET    | `/products/{id}` | Get product by ID     |
-| POST   | `/products`      | Create new product    |
-| PUT    | `/products/{id}` | Update product        |
-| DELETE | `/products/{id}` | Delete product        |
+### Authentication
 
-Full interactive documentation available at:
+| Method | Endpoint      | Description           |
+| ------ | ------------- | --------------------- |
+| POST   | `/auth/login` | Authenticate user     |
+| GET    | `/auth/me`    | Retrieve current user |
 
+### Products
+
+* Product management
+* Product search and filtering
+* Bulk upload
+* Product archiving
+* Low stock monitoring
+
+### Inventory
+
+* Stock adjustments
+* Undo stock movement
+
+### Shipments
+
+* Inbound shipment management
+* Outbound shipment management
+* Bulk imports
+
+### Suppliers
+
+* Create, update, search, and manage suppliers
+
+### Customers
+
+* Create, update, search, and manage customers
+
+### Attachments
+
+* Upload and download shipment-related documents
+
+### Administration
+
+* User management
+* Permission management
+* Audit log
+
+Interactive API documentation is available at:
+
+```text
+http://localhost:8000/docs
 ```
-/docs
-```
 
 ---
 
-## 📊 UI Pages
+# Application Modules
 
-| Page      | Description             |
-| --------- | ----------------------- |
-| Dashboard | Overview of inventory   |
-| Products  | Manage all products     |
-| Stock     | Stock tracking          |
-| Activity  | Inventory activity logs |
+| Module      | Description                      |
+| ----------- | -------------------------------- |
+| Login       | User authentication              |
+| Dashboard   | Inventory summary and statistics |
+| Products    | Product catalog management       |
+| Stock       | Inventory adjustments            |
+| Inbound     | Incoming shipments               |
+| Outbound    | Outgoing shipments               |
+| Suppliers   | Supplier directory               |
+| Customers   | Customer directory               |
+| Activity    | Inventory history                |
+| Users       | User administration              |
+| Permissions | Role permission management       |
+| Audit Log   | System activity records          |
+
+Navigation is generated dynamically based on the authenticated user's permissions.
+
+---
+# Application Preview
+
+Watch the complete application walkthrough on YouTube.
+
+[![Watch Demo](https://img.youtube.com/vi/i4acmU_XxhI/maxresdefault.jpg)](https://youtu.be/i4acmU_XxhI)
+---
+
+# Production Recommendations
+
+* Replace SQLite with PostgreSQL for larger deployments.
+* Configure a secure JWT secret.
+* Change the default administrator password.
+* Store sensitive configuration using environment variables.
+* Restrict CORS origins appropriately.
+* Back up uploaded files or migrate them to cloud object storage.
 
 ---
 
-## 🖼️ Application Preview
+# Future Enhancements
 
-<img width="797" height="746" alt="Warehouse Dashboard Screenshot" src="https://github.com/user-attachments/assets/8e087684-77a5-4b1e-8861-ec604c4d6c54" />
-
----
-
-## 🔒 Production Notes
-
-* SQLite is suitable for small-to-medium deployments
-* For production-scale apps, consider PostgreSQL
-* Use environment variables for production configs
-* Enable CORS properly if deploying separately
-
----
-
-## 🚀 Future Improvements
-
-* JWT Authentication
-* Role-based access control
-* Inventory analytics dashboard
-* Export reports (CSV/PDF)
 * PostgreSQL support
-* CI/CD pipeline
+* Refresh token authentication
+* Advanced analytics dashboard
+* CSV and PDF report generation
+* Email notifications
+* Continuous Integration and Continuous Deployment (CI/CD)
+* Cloud storage integration
 
 ---
 
-## 👨‍💻 Author
+# Author
 
 Mahbub
+
 Warehouse Management System
-
-
