@@ -42,7 +42,7 @@ export default function Products() {
   };
 
   const load = () => {
-    authFetch(`/products?${getParams()}`).then(r => r.json()).then(setItems).catch(() => {});
+    authFetch(`/products?${getParams()}`).then(r => r.json()).then(d => setItems(d.data)).catch(() => {});
   };
 
   useEffect(() => { load(); }, []);
@@ -58,7 +58,7 @@ export default function Products() {
         body: JSON.stringify(newProduct),
       });
       const data = await res.json();
-      if (data.status === "created") {
+      if (res.status === 201) {
         setNewProduct({ name: "", sku: "", category: "", tags: "", quantity: 0, description: "", low_stock: 10 });
         setShowAddForm(false);
         load();
@@ -75,7 +75,7 @@ export default function Products() {
     if (!editingProduct) return;
     try {
       const res = await authFetch(`/products/${editingProduct.id}`, {
-        method: "PUT",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(editingProduct),
       });
@@ -103,9 +103,13 @@ export default function Products() {
     }
   };
 
-  const toggleArchive = async (id) => {
+  const toggleArchive = async (p) => {
     try {
-      await authFetch(`/products/${id}/archive`, { method: "PATCH" });
+      await authFetch(`/products/${p.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: !p.archived }),
+      });
       load();
     } catch {
       showDialog("Error", "Could not toggle archive status.", "error");
@@ -123,7 +127,7 @@ export default function Products() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await authFetch(`/products/bulk-upload`, { method: "POST", body: formData });
+      const res = await authFetch(`/products/imports`, { method: "POST", body: formData });
       const data = await res.json();
       showDialog(
         "Upload complete",
@@ -303,7 +307,7 @@ export default function Products() {
                         {can("products", "write") && (
                           <>
                             <button className="btn btn-ghost btn-xs" onClick={() => setEditingProduct({ ...p })}>Edit</button>
-                            <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p.id)}>{p.archived ? "Unarchive" : "Archive"}</button>
+                            <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p)}>{p.archived ? "Unarchive" : "Archive"}</button>
                           </>
                         )}
                         {can("products", "delete") && (

@@ -19,8 +19,8 @@ export default function Activity() {
   const fetchData = () => {
     const params = new URLSearchParams({ limit: "200" });
     if (actionFilter) params.set("action_type", actionFilter);
-    authFetch(`/history?${params}`).then(r => r.json()).then(setLog).catch(() => {});
-    authFetch(`/history/stats`).then(r => r.json()).then(setStats).catch(() => {});
+    authFetch(`/movements?${params}`).then(r => r.json()).then(d => setLog(d.data)).catch(() => {});
+    authFetch(`/stats`).then(r => r.json()).then(setStats).catch(() => {});
   };
 
   useEffect(() => { fetchData(); }, [actionFilter]);

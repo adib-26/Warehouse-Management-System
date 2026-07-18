@@ -12,8 +12,8 @@ export default function Stock() {
   const [recentMovements, setRecentMovements] = useState([]);
 
   const refreshData = () => {
-    authFetch(`/products`).then(r => r.json()).then(setProducts).catch(() => {});
-    authFetch(`/history?limit=10`).then(r => r.json()).then(setRecentMovements).catch(() => {});
+    authFetch(`/products?limit=500`).then(r => r.json()).then(d => setProducts(d.data)).catch(() => {});
+    authFetch(`/movements?limit=10`).then(r => r.json()).then(d => setRecentMovements(d.data)).catch(() => {});
   };
 
   useEffect(() => { refreshData(); }, []);
@@ -21,16 +21,16 @@ export default function Stock() {
   const adjust = async () => {
     if (!selectedSku || delta === 0) return;
     try {
-      const res = await authFetch(`/stock`, {
+      const res = await authFetch(`/movements`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sku: selectedSku, delta: Number(delta), reason }),
       });
       const data = await res.json();
-      if (res.ok) {
+      if (res.status === 201) {
         setMessage({
           type: data.low_stock_warning ? "warning" : "success",
-          text: `${data.product}: ${delta > 0 ? "+" : ""}${delta} units (now ${data.quantity})${data.low_stock_warning ? " — LOW STOCK!" : ""}`,
+          text: `${data.product_name}: ${delta > 0 ? "+" : ""}${delta} units (now ${data.quantity_after})${data.low_stock_warning ? " — LOW STOCK!" : ""}`,
         });
         setDelta(0);
         setReason("");
@@ -44,8 +44,13 @@ export default function Stock() {
   };
 
   const undo = async () => {
+    const last = recentMovements[0];
+    if (!last) {
+      setMessage({ type: "error", text: "Nothing to undo" });
+      return;
+    }
     try {
-      const res = await authFetch(`/stock/undo`, { method: "POST" });
+      const res = await authFetch(`/movements/${last.id}`, { method: "DELETE" });
       if (res.ok) {
         setMessage({ type: "success", text: "Last movement undone" });
         refreshData();

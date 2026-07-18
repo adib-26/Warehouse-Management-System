@@ -12,13 +12,13 @@ export default function Dashboard() {
     const load = async () => {
       try {
         const [statsRes, lowRes, histRes] = await Promise.all([
-          authFetch(`/history/stats`),
-          authFetch(`/products/low-stock`),
-          authFetch(`/history?limit=10`),
+          authFetch(`/stats`),
+          authFetch(`/products?low_stock=true`),
+          authFetch(`/movements?limit=10`),
         ]);
         setStats(await statsRes.json());
-        setLowStock(await lowRes.json());
-        setRecentActivity(await histRes.json());
+        setLowStock((await lowRes.json()).data);
+        setRecentActivity((await histRes.json()).data);
       } catch {
         console.error("Failed to load dashboard data");
       }
