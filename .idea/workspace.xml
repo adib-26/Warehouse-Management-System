@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="d1ea20b6-9ede-4f36-b49b-6e7362aa356c" name="Changes" comment="Authentication">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-    </list>
+    <list default="true" id="d1ea20b6-9ede-4f36-b49b-6e7362aa356c" name="Changes" comment="Restful Api" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -152,7 +150,15 @@
       <option name="project" value="LOCAL" />
       <updated>1784100601525</updated>
     </task>
-    <option name="localTasksCounter" value="12" />
+    <task id="LOCAL-00012" summary="Restful Api">
+      <option name="closed" value="true" />
+      <created>1784389736409</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1784389736409</updated>
+    </task>
+    <option name="localTasksCounter" value="13" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -165,6 +171,7 @@
     <MESSAGE value="Update UI" />
     <MESSAGE value="Update project" />
     <MESSAGE value="Authentication" />
-    <option name="LAST_COMMIT_MESSAGE" value="Authentication" />
+    <MESSAGE value="Restful Api" />
+    <option name="LAST_COMMIT_MESSAGE" value="Restful Api" />
   </component>
 </project>

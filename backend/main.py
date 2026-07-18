@@ -39,3 +39,25 @@ def on_startup():
 @app.get("/")
 def root():
     return {"status": "NovaLedger API running", "version": "4.0.0", "api": "/v1"}
+
+
+@app.get(f"{V1}")
+def v1_root():
+    return {
+        "status": "NovaLedger API v1",
+        "version": "4.0.0",
+        "docs": "/docs",
+        "resources": {
+            "auth": f"{V1}/auth",
+            "products": f"{V1}/products",
+            "movements": f"{V1}/movements",
+            "stats": f"{V1}/stats",
+            "suppliers": f"{V1}/suppliers",
+            "customers": f"{V1}/customers",
+            "inbound_shipments": f"{V1}/inbound-shipments",
+            "outbound_shipments": f"{V1}/outbound-shipments",
+            "attachments": f"{V1}/attachments",
+            "admin": f"{V1}/admin",
+            "audit_logs": f"{V1}/audit-logs",
+        },
+    }
