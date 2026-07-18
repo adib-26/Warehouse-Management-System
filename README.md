@@ -4,17 +4,18 @@ A full-stack Warehouse Management System built with modern web technologies to s
 
 ## Overview
 
-NovaLedger is designed for organizations that require secure and efficient inventory management. The system provides role-based access control, product management, shipment tracking, stock adjustments, audit logging, and administrative controls within a modern web application.
+NovaLedger is designed for organizations that require secure and efficient inventory management. The system provides role-based access control, product management, shipment tracking, stock adjustments, audit logging, and administrative controls within a modern web application. The backend exposes a versioned RESTful API (`/v1`) that powers the React frontend and can also be consumed independently.
 
 ## Features
 
+* Versioned RESTful API (`/v1`) covering every module, with interactive Swagger docs
 * JWT authentication with secure password hashing using bcrypt
 * Role-based access control (Admin, Manager, Operator)
 * Configurable permission matrix for each module
 * Complete audit trail for user and system activities
 * Product catalog with search, filtering, archiving, and low-stock monitoring
 * Bulk product import using CSV and Excel files
-* Stock adjustment with undo functionality
+* Stock movement tracking with paginated history and filtering
 * Inbound shipment management
 * Outbound shipment management
 * Supplier management
@@ -45,8 +46,7 @@ PythonProject/
 │       ├── auth.py
 │       ├── admin.py
 │       ├── products.py
-│       ├── stock.py
-│       ├── history.py
+│       ├── movements.py
 │       ├── suppliers.py
 │       ├── customers.py
 │       ├── inbound.py
@@ -88,25 +88,26 @@ React + Vite + TailwindCSS
             │
             │ JWT Authentication
             ▼
-FastAPI REST API
+FastAPI REST API (/v1)
             │
             ▼
 SQLite Database
 ```
 
-The frontend authenticates users through the backend using JWT. Every protected request includes a bearer token that is validated before access is granted. Permissions are enforced according to the user's assigned role, while all significant actions are recorded in the audit log.
+The frontend authenticates users through the backend using JWT. Every protected request includes a bearer token that is validated before access is granted. Permissions are enforced according to the user's assigned role, while all significant actions are recorded in the audit log. Every resource is exposed under a single `/v1` prefix, so the same API that drives the React frontend can be called directly by scripts, Postman, or third-party integrations.
 
 ---
 
 # Technology Stack
 
 | Component        | Technology                 |
-| ---------------- | -------------------------- |
+| ---------------- | --------------------------- |
 | Frontend         | React 19, Vite             |
 | Styling          | Tailwind CSS               |
 | Routing          | React Router 7             |
 | Backend          | FastAPI                    |
-| Authentication   | JWT, bcrypt                |
+| API Style        | RESTful, versioned (`/v1`) |
+| Authentication   | JWT (PyJWT), bcrypt        |
 | Database         | SQLite                     |
 | File Processing  | python-multipart, openpyxl |
 | Server           | Uvicorn                    |
@@ -154,11 +155,12 @@ docker compose up --build
 
 Access the application:
 
-| Service           | URL                        |
-| ----------------- | -------------------------- |
-| Frontend          | http://localhost:5173      |
-| Backend           | http://localhost:8000      |
-| API Documentation | http://localhost:8000/docs |
+| Service           | URL                           |
+| ----------------- | ------------------------------ |
+| Frontend          | http://localhost:5173         |
+| Backend           | http://localhost:8000         |
+| REST API          | http://localhost:8000/v1      |
+| API Documentation | http://localhost:8000/docs    |
 
 ---
 
@@ -212,64 +214,114 @@ http://localhost:5173
 
 ---
 
-# API Overview
+# RESTful API Reference
 
-### Authentication
+All endpoints are served under the base path `/v1`. Interactive, always-up-to-date documentation (Swagger UI) is available at `http://localhost:8000/docs`.
 
-| Method | Endpoint      | Description           |
-| ------ | ------------- | --------------------- |
-| POST   | `/auth/login` | Authenticate user     |
-| GET    | `/auth/me`    | Retrieve current user |
+Unless noted otherwise, every endpoint requires a valid JWT bearer token in the `Authorization` header, and access is additionally gated by the caller's role permissions for that module.
 
-### Products
+### Authentication — `/v1/auth`
 
-* Product management
-* Product search and filtering
-* Bulk upload
-* Product archiving
-* Low stock monitoring
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| POST   | `/v1/auth/login` | Authenticate with username and password, returns a JWT and user profile |
+| GET    | `/v1/auth/me` | Retrieve the currently authenticated user |
 
-### Inventory
+### Products — `/v1/products`
 
-* Stock adjustments
-* Undo stock movement
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/products` | List products, with search, filtering, and pagination |
+| GET    | `/v1/products/{product_id}` | Retrieve a single product |
+| POST   | `/v1/products` | Create a new product |
+| PATCH  | `/v1/products/{product_id}` | Update an existing product |
+| DELETE | `/v1/products/{product_id}` | Archive/delete a product |
+| POST   | `/v1/products/imports` | Bulk import products from a CSV or Excel file |
 
-### Shipments
+### Stock Movements — `/v1/movements`
 
-* Inbound shipment management
-* Outbound shipment management
-* Bulk imports
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/movements` | List stock movements, filterable by product and action type, paginated |
+| POST   | `/v1/movements` | Record a stock adjustment (in, out, or correction) |
+| DELETE | `/v1/movements/{movement_id}` | Undo/reverse a stock movement |
 
-### Suppliers
+### Stats — `/v1/stats`
 
-* Create, update, search, and manage suppliers
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/stats` | Retrieve dashboard/inventory statistics |
 
-### Customers
+### Suppliers — `/v1/suppliers`
 
-* Create, update, search, and manage customers
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/suppliers` | List suppliers, with search and pagination |
+| GET    | `/v1/suppliers/{supplier_id}` | Retrieve a single supplier |
+| POST   | `/v1/suppliers` | Create a new supplier |
+| PATCH  | `/v1/suppliers/{supplier_id}` | Update an existing supplier |
+| DELETE | `/v1/suppliers/{supplier_id}` | Delete a supplier |
 
-### Attachments
+### Customers — `/v1/customers`
 
-* Upload and download shipment-related documents
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/customers` | List customers, with search and pagination |
+| GET    | `/v1/customers/{customer_id}` | Retrieve a single customer |
+| POST   | `/v1/customers` | Create a new customer |
+| PATCH  | `/v1/customers/{customer_id}` | Update an existing customer |
+| DELETE | `/v1/customers/{customer_id}` | Delete a customer |
 
-### Administration
+### Inbound Shipments — `/v1/inbound-shipments`
 
-* User management
-* Permission management
-* Audit log
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| POST   | `/v1/inbound-shipments` | Create a new inbound shipment |
+| GET    | `/v1/inbound-shipments` | List inbound shipments, with filtering and pagination |
+| GET    | `/v1/inbound-shipments/{shipment_id}/attachments` | List attachments for a shipment |
+| POST   | `/v1/inbound-shipments/{shipment_id}/attachments` | Upload an attachment to a shipment |
+| POST   | `/v1/inbound-shipments/imports` | Bulk import inbound shipments from a file |
 
-Interactive API documentation is available at:
+### Outbound Shipments — `/v1/outbound-shipments`
 
-```text
-http://localhost:8000/docs
-```
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| POST   | `/v1/outbound-shipments` | Create a new outbound shipment |
+| GET    | `/v1/outbound-shipments` | List outbound shipments, with filtering and pagination |
+| GET    | `/v1/outbound-shipments/{shipment_id}/attachments` | List attachments for a shipment |
+| POST   | `/v1/outbound-shipments/{shipment_id}/attachments` | Upload an attachment to a shipment |
+| POST   | `/v1/outbound-shipments/imports` | Bulk import outbound shipments from a file |
+
+### Attachments — `/v1/attachments`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/attachments/{attachment_id}` | Download an attachment |
+| DELETE | `/v1/attachments/{attachment_id}` | Delete an attachment |
+
+### Administration — `/v1/admin`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/admin/users` | List all users |
+| POST   | `/v1/admin/users` | Create a new user |
+| PATCH  | `/v1/admin/users/{user_id}` | Update a user (role, password, active status) |
+| GET    | `/v1/admin/permissions` | Retrieve the role permission matrix |
+| PUT    | `/v1/admin/permissions` | Update the role permission matrix |
+| GET    | `/v1/admin/audit-logs` | Retrieve audit logs from the admin panel |
+
+### Audit — `/v1/audit-logs`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/audit-logs` | Retrieve a filterable, paginated audit log report |
 
 ---
 
 # Application Modules
 
 | Module      | Description                      |
-| ----------- | -------------------------------- |
+| ----------- | --------------------------------- |
 | Login       | User authentication              |
 | Dashboard   | Inventory summary and statistics |
 | Products    | Product catalog management       |
@@ -293,26 +345,7 @@ Watch the complete application walkthrough on YouTube.
 [![Watch Demo](https://img.youtube.com/vi/i4acmU_XxhI/maxresdefault.jpg)](https://youtu.be/i4acmU_XxhI)
 ---
 
-# Production Recommendations
 
-* Replace SQLite with PostgreSQL for larger deployments.
-* Configure a secure JWT secret.
-* Change the default administrator password.
-* Store sensitive configuration using environment variables.
-* Restrict CORS origins appropriately.
-* Back up uploaded files or migrate them to cloud object storage.
-
----
-
-# Future Enhancements
-
-* PostgreSQL support
-* Refresh token authentication
-* Advanced analytics dashboard
-* CSV and PDF report generation
-* Email notifications
-* Continuous Integration and Continuous Deployment (CI/CD)
-* Cloud storage integration
 
 ---
 
