@@ -4,6 +4,18 @@ services:
     container_name: warehouse-backend
     ports:
       - "8000:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-change-this-development-secret}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      DATABASE_PATH: /data/wms.db
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - warehouse-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   frontend:
     build: ./frontend
@@ -11,4 +23,8 @@ services:
     ports:
       - "5173:5173"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+volumes:
+  warehouse-data:

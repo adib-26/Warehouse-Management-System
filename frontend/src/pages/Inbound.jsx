@@ -116,14 +116,16 @@ export default function Inbound() {
         setUploadFile(null);
         loadAttachments(detailShipment.id);
       }
-    } catch {}
+    } catch (error) {
+      console.error("Failed to upload inbound attachment", error);
+    }
   };
 
   const loadAttachments = (shipmentId) => {
     authFetch(`/inbound-shipments/${shipmentId}/attachments`)
       .then(r => r.json())
       .then(d => setAttachments(d.data))
-      .catch(() => {});
+      .catch(error => console.error("Failed to load inbound attachments", error));
   };
 
   const openDetail = (shipment) => {

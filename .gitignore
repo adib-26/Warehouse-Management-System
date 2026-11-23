@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime data
+backend/wms.db
+backend/uploads/
+*.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/

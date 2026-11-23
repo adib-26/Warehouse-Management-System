@@ -10,7 +10,7 @@ router = APIRouter()
 @router.get("")
 def list_suppliers(
     q: Optional[str] = None,
-    limit: int = Query(default=50, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("suppliers", "read")),
 ):

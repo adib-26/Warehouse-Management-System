@@ -1,16 +1,16 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import date
 
 
 class ProductCreate(BaseModel):
-    name: str
-    sku: str
+    name: str = Field(min_length=1, max_length=200)
+    sku: str = Field(min_length=1, max_length=100)
     description: str = ""
     category: str = ""
     tags: str = ""
-    quantity: int = 0
-    low_stock: int = 10
+    quantity: int = Field(default=0, ge=0)
+    low_stock: int = Field(default=10, ge=0)
 
 
 class ProductUpdate(BaseModel):
@@ -19,15 +19,22 @@ class ProductUpdate(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     tags: Optional[str] = None
-    quantity: Optional[int] = None
-    low_stock: Optional[int] = None
+    quantity: Optional[int] = Field(default=None, ge=0)
+    low_stock: Optional[int] = Field(default=None, ge=0)
     archived: Optional[bool] = None
 
 
 class MovementCreate(BaseModel):
-    sku: str
+    sku: str = Field(min_length=1, max_length=100)
     delta: int
     reason: str = ""
+
+    @field_validator("delta")
+    @classmethod
+    def validate_delta(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("delta must not be zero")
+        return value
 
 
 class SupplierCreate(BaseModel):
@@ -51,7 +58,7 @@ class SupplierUpdate(BaseModel):
 class InboundCreate(BaseModel):
     product_id: int
     supplier_id: int
-    quantity: int
+    quantity: int = Field(gt=0)
     invoice_ref: str = ""
     received_date: Optional[str] = None
     notes: str = ""
@@ -78,7 +85,7 @@ class CustomerUpdate(BaseModel):
 class OutboundCreate(BaseModel):
     product_id: int
     customer_id: int
-    quantity: int
+    quantity: int = Field(gt=0)
     so_ref: str = ""
     dispatch_date: Optional[str] = None
     notes: str = ""

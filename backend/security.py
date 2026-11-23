@@ -46,10 +46,15 @@ def get_current_user(
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    try:
+        user_id = int(payload.get("sub", ""))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
     conn = get_db()
     row = conn.execute(
         "SELECT id, username, full_name, role, active FROM users WHERE id=?",
-        (int(payload["sub"]),),
+        (user_id,),
     ).fetchone()
     conn.close()
 

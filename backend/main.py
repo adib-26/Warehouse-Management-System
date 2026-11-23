@@ -1,14 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import init_db
+from config import get_cors_origins, UPLOAD_DIR
 from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin
-import os
 
 app = FastAPI(title="NovaLedger WMS API", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,12 +33,17 @@ app.include_router(admin.audit_router, prefix=f"{V1}/audit-logs", tags=["Audit"]
 @app.on_event("startup")
 def on_startup():
     init_db()
-    os.makedirs("uploads", exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/")
 def root():
     return {"status": "NovaLedger API running", "version": "4.0.0", "api": "/v1"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get(f"{V1}")

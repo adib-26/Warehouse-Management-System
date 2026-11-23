@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import get_db, MODULES, ROLES
 from security import hash_password, log_audit, require_permission
@@ -10,8 +10,8 @@ router = APIRouter()
 
 
 class UserCreate(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=6)
     full_name: str = ""
     role: str = "operator"
 
@@ -20,7 +20,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     role: Optional[str] = None
     active: Optional[bool] = None
-    password: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=6)
 
 
 class PermissionEntry(BaseModel):
@@ -145,7 +145,8 @@ def update_permissions(update: PermissionMatrixUpdate, user: dict = Depends(requ
 
     for e in update.entries:
         if e.role not in ROLES or e.module not in MODULES:
-            continue
+            conn.close()
+            raise HTTPException(status_code=400, detail=f"Unknown role or module: {e.role}/{e.module}")
         # Admin access to the admin module is immutable to prevent lockout.
         if e.role == "admin" and e.module == "admin":
             continue
@@ -201,7 +202,7 @@ def admin_audit(
     username: Optional[str] = None,
     module: Optional[str] = None,
     action: Optional[str] = None,
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("admin", "read")),
 ):
@@ -216,7 +217,7 @@ def audit_report(
     username: Optional[str] = None,
     module: Optional[str] = None,
     action: Optional[str] = None,
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("reports", "read")),
 ):

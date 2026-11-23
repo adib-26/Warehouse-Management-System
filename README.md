@@ -147,9 +147,10 @@ git clone https://github.com/adib-26/Warehouse-Management-System.git
 cd Warehouse-Management-System
 ```
 
-Build and start the application.
+Copy the environment template, then build and start the application.
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 
@@ -160,7 +161,12 @@ Access the application:
 | Frontend          | http://localhost:5173         |
 | Backend           | http://localhost:8000         |
 | REST API          | http://localhost:8000/v1      |
+| Health check      | http://localhost:8000/health  |
 | API Documentation | http://localhost:8000/docs    |
+
+Docker stores the SQLite database and uploaded files in the `warehouse-data` named volume, so they survive container recreation. Stop the stack with `docker compose down`. Add `-v` only when you intend to delete that data.
+
+The API reads `SECRET_KEY`, `CORS_ORIGINS`, `DATABASE_PATH`, and `UPLOAD_DIR` from the environment. `.env.example` is the template; copy it to `.env` before `docker compose up`. Change `SECRET_KEY` and the default admin password before any shared or production use.
 
 ---
 
@@ -187,13 +193,15 @@ uvicorn main:app --reload --port 8000
 Optional environment variable:
 
 ```bash
-export SECRET_KEY="your-secret-key"
+export SECRET_KEY="replace-with-a-long-random-secret"
+export CORS_ORIGINS="http://localhost:5173"
 ```
 
 Windows:
 
 ```bash
-set SECRET_KEY=your-secret-key
+set SECRET_KEY=replace-with-a-long-random-secret
+set CORS_ORIGINS=http://localhost:5173
 ```
 
 ### Frontend
@@ -204,6 +212,13 @@ cd frontend
 npm install
 
 npm run dev
+```
+
+The frontend reads `VITE_API_URL` when provided and otherwise uses
+`http://localhost:8000`. For a different backend origin:
+
+```bash
+VITE_API_URL=https://api.example.com npm run dev
 ```
 
 Open:

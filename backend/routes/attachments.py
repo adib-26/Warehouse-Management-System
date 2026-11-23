@@ -1,13 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 from database import get_db, MODULES
+from config import UPLOAD_DIR
 from security import get_current_user, check_permission, log_audit
 import os
 
 router = APIRouter()
-
-UPLOAD_DIR = "uploads"
-
 
 def entity_module(entity_type: str) -> str:
     # Attachment permissions follow the module the entity belongs to
@@ -28,7 +26,7 @@ def download_attachment(attachment_id: int, user: dict = Depends(get_current_use
 
     attachment = dict(row)
     check_permission(user, entity_module(attachment["entity_type"]), "read")
-    file_path = os.path.join(UPLOAD_DIR, attachment["stored_name"])
+    file_path = UPLOAD_DIR / attachment["stored_name"]
 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
@@ -54,7 +52,7 @@ def delete_attachment(attachment_id: int, user: dict = Depends(get_current_user)
 
     attachment = dict(row)
     check_permission(user, entity_module(attachment["entity_type"]), "write")
-    file_path = os.path.join(UPLOAD_DIR, attachment["stored_name"])
+    file_path = UPLOAD_DIR / attachment["stored_name"]
 
     if os.path.exists(file_path):
         os.remove(file_path)

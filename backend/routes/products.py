@@ -21,7 +21,7 @@ def list_products(
     sku: Optional[str] = None,
     low_stock: Optional[bool] = None,
     archived: Optional[bool] = None,
-    limit: int = Query(default=50, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("products", "read")),
 ):

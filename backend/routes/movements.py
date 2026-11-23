@@ -9,7 +9,7 @@ router = APIRouter()
 
 @router.get("")
 def list_movements(
-    limit: int = Query(default=50, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     action_type: Optional[str] = None,
     product_id: Optional[int] = None,

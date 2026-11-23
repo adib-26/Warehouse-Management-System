@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
 from database import get_db
+from config import UPLOAD_DIR
 from schemas import OutboundCreate
 from security import require_permission, log_audit
 from typing import Optional
@@ -12,9 +13,6 @@ import uuid
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
-UPLOAD_DIR = "uploads"
-
-
 @router.post("", status_code=201)
 def create_outbound(
     ob: OutboundCreate,
@@ -93,7 +91,7 @@ def create_outbound(
 def list_outbound(
     product_id: Optional[int] = None,
     customer_id: Optional[int] = None,
-    limit: int = Query(default=50, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("outbound", "read")),
 ):
@@ -182,9 +180,11 @@ async def upload_shipment_attachment(
         conn.close()
         raise HTTPException(status_code=404, detail="Shipment not found")
 
-    stored_name = f"{uuid.uuid4().hex}_{file.filename}"
+    original_name = os.path.basename(file.filename)
+    stored_name = f"{uuid.uuid4().hex}_{original_name}"
     content = await file.read()
-    with open(os.path.join(UPLOAD_DIR, stored_name), "wb") as f:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    with open(UPLOAD_DIR / stored_name, "wb") as f:
         f.write(content)
 
     cur.execute(

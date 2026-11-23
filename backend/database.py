@@ -1,12 +1,14 @@
 import sqlite3
-import os
 
-DB = "wms.db"
+from config import DATABASE_PATH, UPLOAD_DIR
 
 
 def get_db():
-    conn = sqlite3.connect(DB, check_same_thread=False)
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -160,7 +162,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-    os.makedirs("uploads", exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 MODULES = ["products", "stock", "inbound", "outbound", "suppliers", "customers", "reports", "admin"]
@@ -172,7 +174,7 @@ DEFAULT_MATRIX = {
     "operator": {
         m: (
             (0, 0, 0) if m == "admin"
-            else (1, 1, 0) if m in ("stock", "inbound", "outbouncurl -fsSL https://chatgpt.com/codex/install.sh | shd")
+            else (1, 1, 0) if m in ("stock", "inbound", "outbound")
             else (1, 0, 0)
         )
         for m in MODULES

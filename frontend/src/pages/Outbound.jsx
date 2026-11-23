@@ -119,14 +119,16 @@ export default function Outbound() {
         setUploadFile(null);
         loadAttachments(detailShipment.id);
       }
-    } catch {}
+    } catch (error) {
+      console.error("Failed to upload outbound attachment", error);
+    }
   };
 
   const loadAttachments = (shipmentId) => {
     authFetch(`/outbound-shipments/${shipmentId}/attachments`)
       .then(r => r.json())
       .then(d => setAttachments(d.data))
-      .catch(() => {});
+      .catch(error => console.error("Failed to load outbound attachments", error));
   };
 
   const openDetail = (shipment) => {
