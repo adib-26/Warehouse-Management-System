@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
 from database import get_db, MODULES
 from config import UPLOAD_DIR
+from file_utils import stage_file_deletion
 from security import get_current_user, check_permission, log_audit
 import os
 
@@ -42,24 +43,44 @@ def download_attachment(attachment_id: int, user: dict = Depends(get_current_use
 def delete_attachment(attachment_id: int, user: dict = Depends(get_current_user)):
     conn = get_db()
     cur = conn.cursor()
-    row = cur.execute(
-        "SELECT * FROM attachments WHERE id=?", (attachment_id,)
-    ).fetchone()
+    staged_path = None
+    file_path = None
+    try:
+        row = cur.execute(
+            "SELECT * FROM attachments WHERE id=?", (attachment_id,)
+        ).fetchone()
 
-    if not row:
+        if not row:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+        attachment = dict(row)
+        check_permission(user, entity_module(attachment["entity_type"]), "write")
+        file_path = UPLOAD_DIR / attachment["stored_name"]
+        try:
+            staged_path = stage_file_deletion(file_path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not remove attachment file") from exc
+
+        cur.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+        log_audit(cur, user, "DELETE", entity_module(attachment["entity_type"]), "attachment", attachment_id, f"Deleted attachment '{attachment['filename']}'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if staged_path is not None and file_path is not None and staged_path.exists():
+            try:
+                os.replace(staged_path, file_path)
+            except OSError:
+                pass
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Attachment not found")
 
-    attachment = dict(row)
-    check_permission(user, entity_module(attachment["entity_type"]), "write")
-    file_path = UPLOAD_DIR / attachment["stored_name"]
-
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
-    cur.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
-    log_audit(cur, user, "DELETE", entity_module(attachment["entity_type"]), "attachment", attachment_id, f"Deleted attachment '{attachment['filename']}'")
-    conn.commit()
-    conn.close()
+    if staged_path is not None:
+        try:
+            staged_path.unlink(missing_ok=True)
+        except OSError:
+            # The record is already gone; an orphaned staged file is safer than
+            # rolling back a completed database transaction.
+            pass
 
     return Response(status_code=204)

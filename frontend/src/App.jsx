@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import ErrorBoundary from "./ErrorBoundary";
 import { AuthProvider, useAuth } from "./AuthContext";
+import { API_ROOT } from "./api";
 import Login from "./pages/Login";
 
 const Dashboard = React.lazy(() => import("./pages/Dashboard"));
@@ -30,8 +31,46 @@ function PageFallback() {
   );
 }
 
+function PermissionRoute({ module, children }) {
+  const { can } = useAuth();
+
+  if (can(module, "read")) return children;
+
+  return (
+    <section className="card">
+      <div className="card-body empty-state">
+        <h2 style={{ margin: "0 0 8px", fontSize: "1.25rem" }}>Access denied</h2>
+        <p className="muted">Your account does not have access to this page.</p>
+      </div>
+    </section>
+  );
+}
+
 function AppShell() {
   const { user, loading } = useAuth();
+  const [systemOnline, setSystemOnline] = React.useState(null);
+
+  React.useEffect(() => {
+    let active = true;
+
+    const checkHealth = async () => {
+      try {
+        const response = await fetch(`${API_ROOT}/health`, { cache: "no-store" });
+        if (!response.ok) throw new Error("Health check failed");
+        const health = await response.json();
+        if (active) setSystemOnline(health.status === "ok");
+      } catch {
+        if (active) setSystemOnline(false);
+      }
+    };
+
+    checkHealth();
+    const timer = window.setInterval(checkHealth, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -80,14 +119,16 @@ function AppShell() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{
+          <div aria-label={systemOnline === false ? "System offline" : systemOnline ? "System online" : "Checking system status"} style={{
             width: 8,
             height: 8,
             borderRadius: "50%",
-            background: "var(--green)",
-            boxShadow: "0 0 6px rgba(16, 185, 129, 0.4)",
+            background: systemOnline === false ? "var(--red)" : systemOnline ? "var(--green)" : "var(--muted)",
+            boxShadow: systemOnline === false ? "0 0 6px rgba(239, 68, 68, 0.4)" : systemOnline ? "0 0 6px rgba(16, 185, 129, 0.4)" : "none",
           }} />
-          <span style={{ fontSize: "0.8125rem", color: "var(--muted)" }}>System Online</span>
+          <span style={{ fontSize: "0.8125rem", color: "var(--muted)" }}>
+            {systemOnline === false ? "System Offline" : systemOnline ? "System Online" : "Checking System"}
+          </span>
         </div>
       </header>
 
@@ -102,17 +143,17 @@ function AppShell() {
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/login" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/products" element={<Products />} />
-                <Route path="/stock" element={<Stock />} />
-                <Route path="/inbound" element={<Inbound />} />
-                <Route path="/outbound" element={<Outbound />} />
-                <Route path="/suppliers" element={<Suppliers />} />
-                <Route path="/customers" element={<Customers />} />
-                <Route path="/activity" element={<Activity />} />
-                <Route path="/users" element={<Users />} />
-                <Route path="/permissions" element={<Permissions />} />
-                <Route path="/audit" element={<AuditLog />} />
+                <Route path="/dashboard" element={<PermissionRoute module="reports"><Dashboard /></PermissionRoute>} />
+                <Route path="/products" element={<PermissionRoute module="products"><Products /></PermissionRoute>} />
+                <Route path="/stock" element={<PermissionRoute module="stock"><Stock /></PermissionRoute>} />
+                <Route path="/inbound" element={<PermissionRoute module="inbound"><Inbound /></PermissionRoute>} />
+                <Route path="/outbound" element={<PermissionRoute module="outbound"><Outbound /></PermissionRoute>} />
+                <Route path="/suppliers" element={<PermissionRoute module="suppliers"><Suppliers /></PermissionRoute>} />
+                <Route path="/customers" element={<PermissionRoute module="customers"><Customers /></PermissionRoute>} />
+                <Route path="/activity" element={<PermissionRoute module="reports"><Activity /></PermissionRoute>} />
+                <Route path="/users" element={<PermissionRoute module="admin"><Users /></PermissionRoute>} />
+                <Route path="/permissions" element={<PermissionRoute module="admin"><Permissions /></PermissionRoute>} />
+                <Route path="/audit" element={<PermissionRoute module="reports"><AuditLog /></PermissionRoute>} />
                 <Route path="*" element={
                   <div className="card">
                     <div className="card-body empty-state">

@@ -36,7 +36,7 @@ def list_movements(
 
     rows = cur.execute(
         f"""
-        SELECT m.id, m.product_id, m.action_type, m.delta, m.reason, m.created_at,
+        SELECT m.id, m.product_id, m.action_type, m.delta, m.reason, m.source, m.created_at,
                p.name, p.sku, p.tags
         FROM movements m
         JOIN products p ON p.id = m.product_id
@@ -60,6 +60,7 @@ def create_movement(
     user: dict = Depends(require_permission("stock", "write")),
 ):
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
 
     product = cur.execute(
@@ -78,10 +79,16 @@ def create_movement(
 
     action_type = "STOCK_IN" if m.delta > 0 else "STOCK_OUT"
 
-    cur.execute("UPDATE products SET quantity=?, updated_at=datetime('now') WHERE id=?", (new_qty, product["id"]))
+    cur.execute(
+        "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') WHERE id=? AND quantity + ? >= 0",
+        (m.delta, product["id"], m.delta),
+    )
+    if cur.rowcount != 1:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Insufficient stock")
 
     cur.execute(
-        "INSERT INTO movements (product_id, action_type, delta, reason) VALUES (?, ?, ?, ?)",
+        "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, ?, ?, ?, 'manual')",
         (product["id"], action_type, m.delta, m.reason),
     )
     movement_id = cur.lastrowid
@@ -105,27 +112,38 @@ def create_movement(
 @router.delete("/{movement_id}", status_code=204)
 def delete_movement(movement_id: int, user: dict = Depends(require_permission("stock", "write"))):
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
 
     movement = cur.execute(
-        "SELECT id, product_id, delta FROM movements WHERE id=?", (movement_id,)
+        "SELECT id, product_id, delta, source FROM movements WHERE id=?", (movement_id,)
     ).fetchone()
 
     if not movement:
         conn.close()
         raise HTTPException(status_code=404, detail="Movement not found")
 
+    if movement["source"] != "manual":
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Only standalone manual stock adjustments can be undone",
+        )
+
     product = cur.execute(
         "SELECT quantity FROM products WHERE id=?", (movement["product_id"],)
     ).fetchone()
-    if product and product["quantity"] - movement["delta"] < 0:
+    if not product or product["quantity"] - movement["delta"] < 0:
         conn.close()
         raise HTTPException(status_code=409, detail="Reversing this movement would make stock negative")
 
     cur.execute(
-        "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') WHERE id=?",
-        (movement["delta"], movement["product_id"]),
+        "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') WHERE id=? AND quantity - ? >= 0",
+        (movement["delta"], movement["product_id"], movement["delta"]),
     )
+    if cur.rowcount != 1:
+        conn.close()
+        raise HTTPException(status_code=409, detail="Stock changed; refresh and try again")
 
     cur.execute("DELETE FROM movements WHERE id=?", (movement_id,))
 

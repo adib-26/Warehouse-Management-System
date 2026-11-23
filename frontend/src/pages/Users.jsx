@@ -122,8 +122,8 @@ export default function Users() {
                 <input className="input" placeholder="jdoe" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} required />
               </div>
               <div className="input-group">
-                <label className="input-label">Password * (min 6 chars)</label>
-                <input className="input" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={6} autoComplete="new-password" />
+                <label className="input-label">Password * (min 12 characters)</label>
+                <input className="input" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={12} maxLength={72} autoComplete="new-password" />
               </div>
               <div className="input-group">
                 <label className="input-label">Full Name</label>
@@ -212,7 +212,7 @@ export default function Users() {
               </div>
               <div className="input-group">
                 <label className="input-label">Reset Password (leave blank to keep current)</label>
-                <input className="input" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} autoComplete="new-password" placeholder="New password" />
+                <input className="input" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} minLength={12} maxLength={72} autoComplete="new-password" placeholder="New password (12+ characters)" />
               </div>
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>

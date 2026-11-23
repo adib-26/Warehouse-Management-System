@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
 
@@ -25,15 +25,15 @@ export default function AuditLog() {
   // Admins use the /admin endpoint; managers with reports access use /audit-logs.
   const endpoint = can("admin", "read") ? "/admin/audit-logs" : "/audit-logs";
 
-  const load = () => {
+  const load = useCallback(() => {
     const params = new URLSearchParams({ limit: "200" });
     if (userFilter) params.set("username", userFilter);
     if (moduleFilter) params.set("module", moduleFilter);
     if (actionFilter) params.set("action", actionFilter);
     authFetch(`${endpoint}?${params}`).then(r => r.json()).then(d => setLogs(d.data)).catch(() => {});
-  };
+  }, [actionFilter, endpoint, moduleFilter, userFilter]);
 
-  useEffect(() => { load(); }, [moduleFilter, actionFilter]);
+  useEffect(() => { load(); }, [load]);
 
   const usernames = [...new Set(logs.map(l => l.username).filter(Boolean))];
   const modules = [...new Set(logs.map(l => l.module).filter(Boolean))];

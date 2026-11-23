@@ -24,7 +24,8 @@ NovaLedger is designed for organizations that require secure and efficient inven
 * File attachment support for shipment documents
 * Dashboard with inventory statistics and recent activities
 * User and permission management
-* Docker support for simplified deployment
+* Docker support with an Nginx frontend, loopback-only published ports, and a persistent data volume
+* GitHub Actions checks for the API tests, frontend build, and a container smoke test
 
 ---
 
@@ -37,15 +38,21 @@ PythonProject/
 ├── docker-compose.yml
 ├── .env.example
 ├── .github/
+│   ├── dependabot.yml
 │   └── workflows/ci.yml
 ├── backend/
 │   ├── Dockerfile
+│   ├── entrypoint.sh
 │   ├── main.py
+│   ├── config.py
 │   ├── database.py
 │   ├── file_utils.py
 │   ├── security.py
 │   ├── schemas.py
 │   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   ├── pytest.ini
+│   ├── tests/
 │   └── routes/
 │       ├── auth.py
 │       ├── admin.py
@@ -60,6 +67,7 @@ PythonProject/
 └── frontend/
     ├── Dockerfile
     ├── nginx.conf
+    ├── security-headers.conf
     ├── package.json
     ├── vite.config.js
     ├── tailwind.config.js
@@ -119,6 +127,8 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Containerization | Docker                     |
 | Orchestration    | Docker Compose             |
 | Static web server | Nginx                      |
+| Tests            | pytest                     |
+| CI               | GitHub Actions             |
 | Linting          | ESLint                     |
 
 ---
@@ -331,6 +341,8 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | Method | Endpoint | Description |
 | ------ | -------- | ----------- |
 | GET    | `/v1/products` | List products, with search, filtering, and pagination |
+| GET    | `/v1/products/export` | Download the current product filters as CSV |
+| GET    | `/v1/products/facets` | List category and tag values used by the catalog filters |
 | GET    | `/v1/products/{product_id}` | Retrieve a single product |
 | POST   | `/v1/products` | Create a new product |
 | PATCH  | `/v1/products/{product_id}` | Update an existing product |

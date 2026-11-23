@@ -1,10 +1,22 @@
-from fastapi import FastAPI
+import sqlite3
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from database import init_db
-from config import get_cors_origins, UPLOAD_DIR
+from database import get_db, init_db
+from config import get_cors_origins, UPLOAD_DIR, validate_runtime_config
 from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin
 
-app = FastAPI(title="NovaLedger WMS API", version="4.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_runtime_config()
+    init_db()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+app = FastAPI(title="NovaLedger WMS API", version="4.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,12 +42,6 @@ app.include_router(admin.router, prefix=f"{V1}/admin", tags=["Admin"])
 app.include_router(admin.audit_router, prefix=f"{V1}/audit-logs", tags=["Audit"])
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
 @app.get("/")
 def root():
     return {"status": "NovaLedger API running", "version": "4.0.0", "api": "/v1"}
@@ -43,7 +49,16 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    conn = None
+    try:
+        conn = get_db()
+        conn.execute("SELECT 1").fetchone()
+    except (OSError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    finally:
+        if conn is not None:
+            conn.close()
+    return {"status": "ok", "database": "ok"}
 
 
 @app.get(f"{V1}")

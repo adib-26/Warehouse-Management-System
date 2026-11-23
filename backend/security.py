@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -6,9 +5,9 @@ import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from config import SECRET_KEY
 from database import get_db
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "novaledger-dev-secret-change-me")
 ALGORITHM = "HS256"
 TOKEN_TTL_HOURS = 12
 

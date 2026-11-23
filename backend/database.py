@@ -1,20 +1,55 @@
 import sqlite3
 
-from config import DATABASE_PATH, UPLOAD_DIR
+from config import (
+    DATABASE_PATH,
+    INITIAL_ADMIN_PASSWORD,
+    INITIAL_ADMIN_USERNAME,
+    UPLOAD_DIR,
+    validate_initial_admin_credentials,
+)
+
+BASE_SCHEMA_VERSION = 1
+
+
+def _migration_2_add_movement_source(cur):
+    """Classify new movements so only standalone adjustments can be reversed."""
+    columns = {row["name"] for row in cur.execute("PRAGMA table_info(movements)")}
+    if "source" not in columns:
+        # Existing rows cannot be classified reliably, so retain them as immutable
+        # history rather than risking a shipment or catalog entry being reversed.
+        cur.execute(
+            "ALTER TABLE movements ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'"
+        )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_movements_source_created "
+        "ON movements (source, created_at)"
+    )
+
+
+SCHEMA_VERSION = 2
+# Add a numbered migration here and increment SCHEMA_VERSION for future schema changes.
+SCHEMA_MIGRATIONS = {2: _migration_2_add_movement_source}
 
 
 def get_db():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    current_version = cur.execute("PRAGMA user_version").fetchone()[0]
+    if current_version > SCHEMA_VERSION:
+        conn.close()
+        raise RuntimeError(
+            f"Database schema version {current_version} is newer than this application supports ({SCHEMA_VERSION})"
+        )
+    conn.execute("PRAGMA journal_mode = WAL")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS products (
@@ -157,7 +192,44 @@ def init_db():
     )
     """)
 
-    seed_auth(cur)
+    cur.executescript("""
+    CREATE INDEX IF NOT EXISTS idx_products_active_updated
+        ON products (deleted, archived, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_products_stock
+        ON products (deleted, archived, quantity, low_stock);
+    CREATE INDEX IF NOT EXISTS idx_movements_product_created
+        ON movements (product_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_inbound_created
+        ON inbound_shipments (created_at);
+    CREATE INDEX IF NOT EXISTS idx_outbound_created
+        ON outbound_shipments (created_at);
+    CREATE INDEX IF NOT EXISTS idx_attachments_entity
+        ON attachments (entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_created
+        ON audit_logs (created_at);
+    """)
+
+    # Version 0 databases are existing installations that predate schema tracking.
+    # The CREATE TABLE statements above establish the version 1 baseline for both
+    # those installations and fresh databases.
+    if current_version == 0:
+        current_version = BASE_SCHEMA_VERSION
+        cur.execute(f"PRAGMA user_version = {BASE_SCHEMA_VERSION}")
+    while current_version < SCHEMA_VERSION:
+        next_version = current_version + 1
+        migration = SCHEMA_MIGRATIONS.get(next_version)
+        if migration is None:
+            conn.close()
+            raise RuntimeError(f"Missing database migration for schema version {next_version}")
+        migration(cur)
+        cur.execute(f"PRAGMA user_version = {next_version}")
+        current_version = next_version
+
+    try:
+        seed_auth(cur)
+    except Exception:
+        conn.close()
+        raise
 
     conn.commit()
     conn.close()
@@ -186,10 +258,11 @@ def seed_auth(cur):
     if cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         import bcrypt
 
-        password_hash = bcrypt.hashpw(b"admin123", bcrypt.gensalt()).decode()
+        validate_initial_admin_credentials()
+        password_hash = bcrypt.hashpw(INITIAL_ADMIN_PASSWORD.encode(), bcrypt.gensalt()).decode()
         cur.execute(
             "INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)",
-            ("admin", password_hash, "Administrator", "admin"),
+            (INITIAL_ADMIN_USERNAME, password_hash, "Administrator", "admin"),
         )
 
     if cur.execute("SELECT COUNT(*) FROM permissions").fetchone()[0] == 0:

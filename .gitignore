@@ -3,11 +3,18 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.coverage
 
 # Runtime data
 backend/wms.db
 backend/uploads/
 *.db
+
+# Local environment secrets
+.env
+.env.*
+!.env.example
 
 # Frontend
 frontend/node_modules/

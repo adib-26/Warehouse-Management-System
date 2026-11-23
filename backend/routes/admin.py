@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from database import get_db, MODULES, ROLES
 from security import hash_password, log_audit, require_permission
@@ -11,16 +11,30 @@ router = APIRouter()
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=100)
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=12)
     full_name: str = ""
     role: str = "operator"
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be no more than 72 UTF-8 bytes")
+        return value
 
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     role: Optional[str] = None
     active: Optional[bool] = None
-    password: Optional[str] = Field(default=None, min_length=6)
+    password: Optional[str] = Field(default=None, min_length=12)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be no more than 72 UTF-8 bytes")
+        return value
 
 
 class PermissionEntry(BaseModel):
@@ -50,8 +64,8 @@ def list_users(user: dict = Depends(require_permission("admin", "read"))):
 def create_user(u: UserCreate, response: Response, user: dict = Depends(require_permission("admin", "write"))):
     if u.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}")
-    if not u.username.strip() or len(u.password) < 6:
-        raise HTTPException(status_code=400, detail="Username required and password must be at least 6 characters")
+    if not u.username.strip() or len(u.password) < 12:
+        raise HTTPException(status_code=400, detail="Username required and password must be at least 12 characters")
 
     conn = get_db()
     cur = conn.cursor()
@@ -81,6 +95,7 @@ def create_user(u: UserCreate, response: Response, user: dict = Depends(require_
 @router.patch("/users/{user_id}")
 def update_user(user_id: int, u: UserUpdate, user: dict = Depends(require_permission("admin", "write"))):
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
     existing = cur.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     if not existing:
@@ -90,6 +105,26 @@ def update_user(user_id: int, u: UserUpdate, user: dict = Depends(require_permis
     if u.active is False and user_id == user["id"]:
         conn.close()
         raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+
+    removes_active_admin = (
+        existing["role"] == "admin"
+        and bool(existing["active"])
+        and (
+            u.active is False
+            or (u.role is not None and u.role != "admin")
+        )
+    )
+    if removes_active_admin:
+        remaining_admins = cur.execute(
+            "SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND id!=?",
+            (user_id,),
+        ).fetchone()[0]
+        if remaining_admins == 0:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="At least one active administrator must remain",
+            )
 
     changes = []
     if u.full_name is not None:
@@ -105,9 +140,9 @@ def update_user(user_id: int, u: UserUpdate, user: dict = Depends(require_permis
         cur.execute("UPDATE users SET active=? WHERE id=?", (1 if u.active else 0, user_id))
         changes.append("activated" if u.active else "deactivated")
     if u.password is not None:
-        if len(u.password) < 6:
+        if len(u.password) < 12:
             conn.close()
-            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+            raise HTTPException(status_code=400, detail="Password must be at least 12 characters")
         cur.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(u.password), user_id))
         changes.append("password reset")
 

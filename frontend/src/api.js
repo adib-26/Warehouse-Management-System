@@ -1,4 +1,6 @@
-export const API = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/v1`;
+const apiBase = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+export const API_ROOT = apiBase;
+export const API = `${apiBase}/v1`;
 
 export function getToken() {
   return localStorage.getItem("token");

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
 
@@ -27,12 +27,12 @@ export default function Suppliers() {
   const [editing, setEditing] = useState(null);
   const [dialog, setDialog] = useState(null);
 
-  const load = () => {
+  const load = useCallback(() => {
     const params = q ? `?q=${encodeURIComponent(q)}` : "";
     authFetch(`/suppliers${params}`).then(r => r.json()).then(d => setSuppliers(d.data)).catch(() => {});
-  };
+  }, [q]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const showMsg = (title, body, variant = "success") => setDialog({ title, body, variant });
 

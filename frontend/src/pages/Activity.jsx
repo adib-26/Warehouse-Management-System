@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 
 const ACTION_STYLES = {
@@ -16,14 +16,14 @@ export default function Activity() {
   const [stats, setStats] = useState(null);
   const [actionFilter, setActionFilter] = useState("");
 
-  const fetchData = () => {
+  const fetchData = useCallback(() => {
     const params = new URLSearchParams({ limit: "200" });
     if (actionFilter) params.set("action_type", actionFilter);
     authFetch(`/movements?${params}`).then(r => r.json()).then(d => setLog(d.data)).catch(() => {});
     authFetch(`/stats`).then(r => r.json()).then(setStats).catch(() => {});
-  };
+  }, [actionFilter]);
 
-  useEffect(() => { fetchData(); }, [actionFilter]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const actionTypes = [...new Set(log.map(l => l.action_type))];
 

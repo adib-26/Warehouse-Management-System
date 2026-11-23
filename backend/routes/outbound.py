@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
 from database import get_db
 from config import UPLOAD_DIR
+from file_utils import read_upload, safe_filename, write_upload_file
 from schemas import OutboundCreate
 from security import require_permission, log_audit
 from typing import Optional
@@ -20,6 +21,7 @@ def create_outbound(
     user: dict = Depends(require_permission("outbound", "write")),
 ):
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
 
     product = cur.execute(
@@ -53,6 +55,15 @@ def create_outbound(
     dispatch_date = ob.dispatch_date or date.today().isoformat()
 
     cur.execute(
+        "UPDATE products SET quantity=quantity - ?, updated_at=datetime('now') WHERE id=? AND quantity >= ?",
+        (ob.quantity, ob.product_id, ob.quantity),
+    )
+    if cur.rowcount != 1:
+        available = cur.execute("SELECT quantity FROM products WHERE id=?", (ob.product_id,)).fetchone()[0]
+        conn.close()
+        raise HTTPException(status_code=409, detail=f"Insufficient stock (available: {available})")
+
+    cur.execute(
         """
         INSERT INTO outbound_shipments (product_id, customer_id, quantity, so_ref, dispatch_date, notes)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -62,13 +73,9 @@ def create_outbound(
     shipment_id = cur.lastrowid
 
     new_qty = product["quantity"] - ob.quantity
-    cur.execute(
-        "UPDATE products SET quantity=?, updated_at=datetime('now') WHERE id=?",
-        (new_qty, ob.product_id),
-    )
 
     cur.execute(
-        "INSERT INTO movements (product_id, action_type, delta, reason) VALUES (?, 'STOCK_OUT', ?, ?)",
+        "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
         (ob.product_id, -ob.quantity, f"Outbound to {customer['name']}: {ob.so_ref or 'no ref'}"),
     )
 
@@ -171,38 +178,45 @@ async def upload_shipment_attachment(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
+    content = await read_upload(file)
+    original_name = safe_filename(file.filename)
+    stored_name = uuid.uuid4().hex
+
     conn = get_db()
     cur = conn.cursor()
-    shipment = cur.execute(
-        "SELECT id FROM outbound_shipments WHERE id=?", (shipment_id,)
-    ).fetchone()
-    if not shipment:
+    try:
+        shipment = cur.execute(
+            "SELECT id FROM outbound_shipments WHERE id=?", (shipment_id,)
+        ).fetchone()
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+
+        try:
+            file_path = write_upload_file(UPLOAD_DIR, stored_name, content)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not store attachment") from exc
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO attachments (entity_type, entity_id, filename, stored_name, file_size, mime_type)
+                VALUES ('outbound', ?, ?, ?, ?, ?)
+                """,
+                (shipment_id, original_name, stored_name, len(content), file.content_type or "application/octet-stream"),
+            )
+            attachment_id = cur.lastrowid
+            log_audit(cur, user, "UPLOAD", "outbound", "attachment", attachment_id, f"Uploaded '{original_name}' to outbound shipment #{shipment_id}")
+            row = cur.execute(
+                "SELECT id, filename, file_size, mime_type, created_at FROM attachments WHERE id=?",
+                (attachment_id,),
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            file_path.unlink(missing_ok=True)
+            raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Shipment not found")
-
-    original_name = os.path.basename(file.filename)
-    stored_name = f"{uuid.uuid4().hex}_{original_name}"
-    content = await file.read()
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    with open(UPLOAD_DIR / stored_name, "wb") as f:
-        f.write(content)
-
-    cur.execute(
-        """
-        INSERT INTO attachments (entity_type, entity_id, filename, stored_name, file_size, mime_type)
-        VALUES ('outbound', ?, ?, ?, ?, ?)
-        """,
-        (shipment_id, file.filename, stored_name, len(content), file.content_type or "application/octet-stream"),
-    )
-    attachment_id = cur.lastrowid
-    log_audit(cur, user, "UPLOAD", "outbound", "attachment", attachment_id, f"Uploaded '{file.filename}' to outbound shipment #{shipment_id}")
-    conn.commit()
-
-    row = cur.execute(
-        "SELECT id, filename, file_size, mime_type, created_at FROM attachments WHERE id=?",
-        (attachment_id,),
-    ).fetchone()
-    conn.close()
 
     response.headers["Location"] = f"/v1/attachments/{attachment_id}"
     return dict(row)
@@ -214,8 +228,9 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only CSV and XLSX files are supported")
 
-    content = await file.read()
+    content = await read_upload(file)
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
     imported = 0
     errors = []
@@ -291,7 +306,7 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
             )
 
             cur.execute(
-                "INSERT INTO movements (product_id, action_type, delta, reason) VALUES (?, 'STOCK_OUT', ?, ?)",
+                "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
                 (product["id"], -quantity, f"Bulk outbound: {so_ref or 'no ref'}"),
             )
 
@@ -310,13 +325,14 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
             conn.close()
             raise HTTPException(status_code=500, detail="openpyxl is required for XLSX files")
 
-        wb = openpyxl.load_workbook(io.BytesIO(content))
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         ws = wb.active
         rows_iter = iter(ws.iter_rows(values_only=True))
         headers = [str(h).lower().strip() if h else "" for h in next(rows_iter, [])]
         for i, row in enumerate(rows_iter, start=2):
             data = dict(zip(headers, row))
             process_row(data, i)
+        wb.close()
 
     log_audit(cur, user, "BULK_IMPORT", "outbound", "file", None, f"Imported {imported} outbound records from {file.filename}")
     conn.commit()

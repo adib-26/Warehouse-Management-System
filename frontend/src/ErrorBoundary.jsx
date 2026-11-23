@@ -1,5 +1,7 @@
 import React from "react";
 
+const showErrorDetails = import.meta.env.DEV;
+
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -38,22 +40,24 @@ export default class ErrorBoundary extends React.Component {
                   <p className="muted" style={{ margin: "4px 0 0" }}>An unexpected error occurred.</p>
                 </div>
               </div>
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: "0.875rem" }}>Error details</summary>
-                <pre style={{
-                  whiteSpace: "pre-wrap",
-                  marginTop: 8,
-                  padding: 16,
-                  borderRadius: "var(--radius-sm)",
-                  background: "var(--bg-surface-elevated)",
-                  fontSize: "0.8125rem",
-                  color: "var(--text-secondary)",
-                  overflow: "auto",
-                }}>
-                  {String(this.state.error)}
-                  {this.state.errorInfo ? `\n\n${this.state.errorInfo.componentStack}` : ""}
-                </pre>
-              </details>
+              {showErrorDetails && (
+                <details style={{ marginTop: 12 }}>
+                  <summary style={{ cursor: "pointer", color: "var(--muted)", fontSize: "0.875rem" }}>Error details</summary>
+                  <pre style={{
+                    whiteSpace: "pre-wrap",
+                    marginTop: 8,
+                    padding: 16,
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--bg-surface-elevated)",
+                    fontSize: "0.8125rem",
+                    color: "var(--text-secondary)",
+                    overflow: "auto",
+                  }}>
+                    {String(this.state.error)}
+                    {this.state.errorInfo ? `\n\n${this.state.errorInfo.componentStack}` : ""}
+                  </pre>
+                </details>
+              )}
               <button className="btn btn-primary btn-sm" style={{ marginTop: 16 }} onClick={() => window.location.reload()}>
                 Reload Page
               </button>

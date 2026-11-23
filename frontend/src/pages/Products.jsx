@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
+
+const PAGE_SIZE = 50;
 
 function Dialog({ open, onClose, title, children }) {
   if (!open) return null;
@@ -19,19 +22,23 @@ function Dialog({ open, onClose, title, children }) {
 
 export default function Products() {
   const { can } = useAuth();
+  const [searchParams] = useSearchParams();
   const [items, setItems] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [facets, setFacets] = useState({ categories: [], tags: [] });
   const [q, setQ] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
-  const [showLowStock, setShowLowStock] = useState(false);
-  const [showArchived, setShowArchived] = useState(false);
+  const [showLowStock, setShowLowStock] = useState(() => searchParams.get("low_stock") === "true");
+  const [showArchived, setShowArchived] = useState(() => searchParams.get("archived") === "true");
   const [newProduct, setNewProduct] = useState({ name: "", sku: "", category: "", tags: "", quantity: 0, description: "", low_stock: 10 });
   const [editingProduct, setEditingProduct] = useState(null);
   const [dialog, setDialog] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
 
-  const getParams = () => {
+  const getParams = useCallback(() => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (categoryFilter) params.set("category", categoryFilter);
@@ -39,13 +46,26 @@ export default function Products() {
     if (showLowStock) params.set("low_stock", "true");
     if (showArchived) params.set("archived", "true");
     return params;
-  };
+  }, [categoryFilter, q, showArchived, showLowStock, tagFilter]);
 
-  const load = () => {
-    authFetch(`/products?${getParams()}`).then(r => r.json()).then(d => setItems(d.data)).catch(() => {});
-  };
+  const load = useCallback(() => {
+    const params = getParams();
+    params.set("limit", String(PAGE_SIZE));
+    params.set("offset", String(offset));
+    authFetch(`/products?${params}`).then(r => r.json()).then(d => {
+      setItems(d.data);
+      setTotal(d.meta.total);
+    }).catch(() => {});
+  }, [getParams, offset]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    authFetch("/products/facets")
+      .then(r => r.json())
+      .then(setFacets)
+      .catch(() => {});
+  }, []);
 
   const showDialog = (title, body, variant = "success") => setDialog({ title, body, variant });
 
@@ -141,8 +161,27 @@ export default function Products() {
     }
   };
 
-  const categories = [...new Set(items.map(p => p.category).filter(Boolean))];
-  const allTags = [...new Set(items.flatMap(p => p.tags ? p.tags.split(",").map(t => t.trim()) : []))].filter(Boolean);
+  const exportProducts = async () => {
+    try {
+      const res = await authFetch(`/products/export?${getParams()}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showDialog("Export failed", data.detail || "Could not export products.", "error");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "products.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      showDialog("Export failed", "Could not reach the API.", "error");
+    }
+  };
 
   return (
     <section>
@@ -151,8 +190,10 @@ export default function Products() {
           <h1 className="page-title">Products</h1>
           <p className="page-subtitle">Manage your inventory catalog</p>
         </div>
-        {can("products", "write") && (
-          <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-secondary btn-sm" onClick={exportProducts}>Export CSV</button>
+          {can("products", "write") && (
+            <>
             <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
               Upload CSV/XLSX
@@ -161,8 +202,9 @@ export default function Products() {
             <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>
               {showAddForm ? "Cancel" : "+ Add Product"}
             </button>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {uploading && (
@@ -222,30 +264,30 @@ export default function Products() {
               className="input"
               placeholder="Search name, SKU, or description..."
               value={q}
-              onChange={e => setQ(e.target.value)}
+              onChange={e => { setQ(e.target.value); setOffset(0); }}
               onKeyDown={e => e.key === "Enter" && load()}
               style={{ flex: "1 1 200px", maxWidth: 360 }}
             />
-            <select className="select" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)} style={{ width: "auto", minWidth: 140 }}>
+            <select className="select" value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }} style={{ width: "auto", minWidth: 140 }}>
               <option value="">All categories</option>
-              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              {facets.categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
-            {allTags.length > 0 && (
-              <select className="select" value={tagFilter} onChange={e => setTagFilter(e.target.value)} style={{ width: "auto", minWidth: 140 }}>
+            {facets.tags.length > 0 && (
+              <select className="select" value={tagFilter} onChange={e => { setTagFilter(e.target.value); setOffset(0); }} style={{ width: "auto", minWidth: 140 }}>
                 <option value="">All tags</option>
-                {allTags.map(t => <option key={t} value={t}>{t}</option>)}
+                {facets.tags.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             )}
             <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
-              <input type="checkbox" checked={showLowStock} onChange={e => setShowLowStock(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              <input type="checkbox" checked={showLowStock} onChange={e => { setShowLowStock(e.target.checked); setOffset(0); }} style={{ accentColor: "var(--accent)" }} />
               Low stock
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
-              <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              <input type="checkbox" checked={showArchived} onChange={e => { setShowArchived(e.target.checked); setOffset(0); }} style={{ accentColor: "var(--accent)" }} />
               Archived
             </label>
             <button className="btn btn-secondary btn-sm" onClick={load}>Search</button>
-            <span className="muted" style={{ marginLeft: "auto" }}>{items.length} product{items.length !== 1 ? "s" : ""}</span>
+            <span className="muted" style={{ marginLeft: "auto" }}>{total} product{total !== 1 ? "s" : ""}</span>
           </div>
         </div>
       </div>
@@ -321,6 +363,16 @@ export default function Products() {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 4px", flexWrap: "wrap" }}>
+        <span className="muted">
+          {total === 0 ? "No products" : `Showing ${offset + 1}–${Math.min(offset + items.length, total)} of ${total}`}
+        </span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-secondary btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+          <button className="btn btn-secondary btn-sm" disabled={offset + items.length >= total} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
+        </div>
       </div>
 
       <Dialog open={!!editingProduct} onClose={() => setEditingProduct(null)} title="Edit Product">
