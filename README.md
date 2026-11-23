@@ -14,6 +14,7 @@ NovaLedger is designed for organizations that require secure and efficient inven
 * Configurable permission matrix for each module
 * Complete audit trail for user and system activities
 * Product catalog with search, filtering, archiving, and low-stock monitoring
+* Filter-aware product CSV exports for reporting and spreadsheet workflows
 * Bulk product import using CSV and Excel files
 * Stock movement tracking with paginated history and filtering
 * Inbound shipment management
@@ -34,11 +35,14 @@ PythonProject/
 │
 ├── README.md
 ├── docker-compose.yml
-│
+├── .env.example
+├── .github/
+│   └── workflows/ci.yml
 ├── backend/
 │   ├── Dockerfile
 │   ├── main.py
 │   ├── database.py
+│   ├── file_utils.py
 │   ├── security.py
 │   ├── schemas.py
 │   ├── requirements.txt
@@ -55,6 +59,7 @@ PythonProject/
 │
 └── frontend/
     ├── Dockerfile
+    ├── nginx.conf
     ├── package.json
     ├── vite.config.js
     ├── tailwind.config.js
@@ -113,6 +118,7 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Server           | Uvicorn                    |
 | Containerization | Docker                     |
 | Orchestration    | Docker Compose             |
+| Static web server | Nginx                      |
 | Linting          | ESLint                     |
 
 ---
@@ -125,14 +131,17 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Manager  | Read and write access to operational modules without delete privileges |
 | Operator | Inventory operations with read-only access to selected modules         |
 
-Default administrator credentials:
+Development administrator credentials:
 
 ```text
 Username: admin
 Password: admin123
 ```
 
-For production deployments, change the default password immediately.
+The local development database is seeded with this account. Docker starts in
+production mode and requires a unique initial administrator password in `.env`.
+New user accounts and password resets require at least 12 characters. Change
+the administrator password after first login as well.
 
 ---
 
@@ -147,10 +156,15 @@ git clone https://github.com/adib-26/Warehouse-Management-System.git
 cd Warehouse-Management-System
 ```
 
-Copy the environment template, then build and start the application.
+Copy the environment template, set a unique signing key and initial
+administrator password, then build and start the application. Generate the key
+with `openssl rand -hex 32`; set `INITIAL_ADMIN_PASSWORD` to a unique password
+with at least 16 characters.
+The bcrypt-backed account password fields accept up to 72 UTF-8 bytes.
 
 ```bash
 cp .env.example .env
+# Edit .env: replace SECRET_KEY and INITIAL_ADMIN_PASSWORD before starting.
 docker compose up --build
 ```
 
@@ -159,14 +173,59 @@ Access the application:
 | Service           | URL                           |
 | ----------------- | ------------------------------ |
 | Frontend          | http://localhost:5173         |
-| Backend           | http://localhost:8000         |
-| REST API          | http://localhost:8000/v1      |
-| Health check      | http://localhost:8000/health  |
-| API Documentation | http://localhost:8000/docs    |
+| Backend           | http://localhost:8000 (local only) |
+| REST API          | http://localhost:8000/v1 (local only) |
+| Health check      | http://localhost:8000/health (local only) |
+| API Documentation | http://localhost:8000/docs (local only) |
 
-Docker stores the SQLite database and uploaded files in the `warehouse-data` named volume, so they survive container recreation. Stop the stack with `docker compose down`. Add `-v` only when you intend to delete that data.
+Docker serves a built React frontend through Nginx. It stores the SQLite
+database and uploaded files in the `warehouse-data` named volume, so they
+survive container recreation. Stop the stack with `docker compose down`. Add
+`-v` only when you intend to delete that data. The frontend proxies `/v1` to the
+backend, so it works through one browser origin by default. `VITE_API_URL` is an
+optional build-time override for a separately hosted public API.
 
-The API reads `SECRET_KEY`, `CORS_ORIGINS`, `DATABASE_PATH`, and `UPLOAD_DIR` from the environment. `.env.example` is the template; copy it to `.env` before `docker compose up`. Change `SECRET_KEY` and the default admin password before any shared or production use.
+Both published ports bind to `127.0.0.1` by default. If port 8000 or 5173 is
+already in use, set `BACKEND_PORT` or `FRONTEND_PORT` in `.env`; the container
+ports remain 8000 and 80 respectively. Deliberately change a bind address only
+when a network design requires it.
+
+The API reads `APP_ENV`, `SECRET_KEY`, `INITIAL_ADMIN_USERNAME`,
+`INITIAL_ADMIN_PASSWORD`, `CORS_ORIGINS`, `DATABASE_PATH`, `UPLOAD_DIR`, and
+`MAX_UPLOAD_BYTES` from the environment. Production startup rejects the built-in
+development signing key and weak first-run administrator passwords. Existing
+databases keep their current users; use the administration screen to change an
+existing account password. Changing `SECRET_KEY` invalidates all active JWTs.
+The frontend proxy receives the same `MAX_UPLOAD_BYTES` value, so uploads are
+rejected consistently at the configured limit.
+
+### Database upgrades and backups
+
+SQLite schema versions are stored in `PRAGMA user_version` and applied during
+startup. Keep the `warehouse-data` volume when updating the application image.
+Before a production upgrade, create an online SQLite backup from the running
+container:
+
+```bash
+docker compose exec -T backend python -c "import sqlite3; source=sqlite3.connect('/data/wms.db'); backup=sqlite3.connect('/data/wms-pre-upgrade.db'); source.backup(backup); backup.close(); source.close()"
+```
+
+Future schema changes belong in numbered functions in `backend/database.py`;
+increment `SCHEMA_VERSION` and register each migration in `SCHEMA_MIGRATIONS`.
+Never edit an already released migration, since existing installations have
+recorded which versions have run.
+
+### Production deployment notes
+
+For an internet-facing deployment, keep the Compose ports loopback-only and
+place a TLS-terminating reverse proxy (such as Caddy, Traefik, or a managed
+load balancer) in front of the frontend. Serve HTTPS before exposing the app;
+do not publish the backend directly. Enable HSTS only at that HTTPS boundary.
+
+The included database is SQLite and the application is designed for a single
+backend instance sharing one `warehouse-data` volume. SQLite supports one
+writer at a time; do not horizontally scale the backend or mount that volume on
+multiple hosts. Move to a server database before a multi-instance deployment.
 
 ---
 
@@ -190,7 +249,11 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-Optional environment variable:
+Development defaults are suitable for local use. For a shared deployment, set
+`APP_ENV=production`, generate a unique `SECRET_KEY`, and set the initial admin
+credentials before starting Uvicorn. Production mode enforces those settings.
+
+Optional development environment variables:
 
 ```bash
 export SECRET_KEY="replace-with-a-long-random-secret"
@@ -209,16 +272,37 @@ set CORS_ORIGINS=http://localhost:5173
 ```bash
 cd frontend
 
-npm install
+npm ci
 
 npm run dev
 ```
 
-The frontend reads `VITE_API_URL` when provided and otherwise uses
-`http://localhost:8000`. For a different backend origin:
+The frontend uses the Vite development proxy by default, so start the backend on
+port 8000 before running the frontend. Set `VITE_API_URL` only when the browser
+must call a separately hosted API origin:
 
 ```bash
 VITE_API_URL=https://api.example.com npm run dev
+```
+
+### Development checks
+
+Run the same checks used by CI:
+
+```bash
+cd backend
+pip install -r requirements.txt -r requirements-dev.txt
+pip check
+python -m compileall -q .
+pytest -q
+pip-audit -r requirements.txt
+pip-audit -r requirements-dev.txt
+
+cd ../frontend
+npm ci
+npm run lint
+npm run build
+npm audit --audit-level=high
 ```
 
 Open:
@@ -351,16 +435,6 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | Audit Log   | System activity records          |
 
 Navigation is generated dynamically based on the authenticated user's permissions.
-
----
-# Application Preview
-
-Watch the complete application walkthrough on YouTube.
-
-[![Watch Demo](https://img.youtube.com/vi/i4acmU_XxhI/maxresdefault.jpg)](https://youtu.be/i4acmU_XxhI)
----
-
-
 
 ---
 
