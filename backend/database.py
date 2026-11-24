@@ -20,9 +20,10 @@ from config import (
 )
 
 BASE_SCHEMA_VERSION = 2
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 DATA_TABLES = (
+    "forecast_evaluation_metrics",
     "forecast_results",
     "forecast_m5_imports",
     "forecast_demand_history",
@@ -106,6 +107,9 @@ class Cursor:
             for row in self._raw.fetchmany(size)
         ]
 
+    def close(self):
+        self._raw.close()
+
     @property
     def lastrowid(self):
         return self._raw.lastrowid
@@ -121,6 +125,10 @@ class Connection:
 
     def cursor(self):
         return Cursor(self._raw.cursor(pymysql.cursors.DictCursor))
+
+    def stream_cursor(self):
+        """Open an unbuffered cursor for large, ordered result sets."""
+        return Cursor(self._raw.cursor(pymysql.cursors.SSDictCursor))
 
     def execute(self, sql, params=None):
         return self.cursor().execute(sql, params)
@@ -356,8 +364,8 @@ def _migration_3_forecasting_schema(cur):
             model_name VARCHAR(50) NOT NULL,
             model_version VARCHAR(30) NOT NULL,
             generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY uq_forecast_result_run_series_date
-                (run_id, product_id, warehouse_id, forecast_date),
+            UNIQUE KEY uq_forecast_result_run_series_model_date
+                (run_id, product_id, warehouse_id, forecast_date, model_name),
             KEY idx_forecast_result_series_date
                 (product_id, warehouse_id, forecast_date),
             CONSTRAINT ck_forecast_result_demand CHECK (predicted_demand >= 0),
@@ -366,6 +374,48 @@ def _migration_3_forecasting_schema(cur):
             CONSTRAINT fk_forecast_result_product FOREIGN KEY (product_id)
                 REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE,
             CONSTRAINT fk_forecast_result_warehouse FOREIGN KEY (warehouse_id)
+                REFERENCES warehouses(id) ON DELETE RESTRICT ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS forecast_evaluation_metrics (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            run_id BIGINT NOT NULL,
+            product_id INT NOT NULL,
+            warehouse_id INT NOT NULL,
+            model_key VARCHAR(50) NOT NULL,
+            model_name VARCHAR(50) NOT NULL,
+            model_version VARCHAR(30) NOT NULL,
+            observation_count SMALLINT UNSIGNED NOT NULL,
+            actual_demand_total DECIMAL(20,2) NOT NULL,
+            absolute_error_total DECIMAL(20,4) NOT NULL,
+            mae DECIMAL(20,4) NOT NULL,
+            rmse DECIMAL(20,4) NOT NULL,
+            wape_pct DECIMAL(20,4) NULL,
+            bias DECIMAL(20,4) NOT NULL,
+            mase DECIMAL(20,4) NULL,
+            naive_mae_scale DECIMAL(20,4) NULL,
+            zero_demand_holdout TINYINT NOT NULL DEFAULT 0,
+            generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_forecast_evaluation_run_series_model
+                (run_id, product_id, warehouse_id, model_key),
+            KEY idx_forecast_evaluation_run_model (run_id, model_key),
+            CONSTRAINT ck_forecast_evaluation_observations
+                CHECK (observation_count > 0),
+            CONSTRAINT ck_forecast_evaluation_actual_total
+                CHECK (actual_demand_total >= 0),
+            CONSTRAINT ck_forecast_evaluation_absolute_error
+                CHECK (absolute_error_total >= 0),
+            CONSTRAINT ck_forecast_evaluation_mae CHECK (mae >= 0),
+            CONSTRAINT ck_forecast_evaluation_rmse CHECK (rmse >= 0),
+            CONSTRAINT ck_forecast_evaluation_wape CHECK (wape_pct IS NULL OR wape_pct >= 0),
+            CONSTRAINT ck_forecast_evaluation_zero_holdout
+                CHECK (zero_demand_holdout IN (0, 1)),
+            CONSTRAINT fk_forecast_evaluation_run FOREIGN KEY (run_id)
+                REFERENCES forecast_runs(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+            CONSTRAINT fk_forecast_evaluation_product FOREIGN KEY (product_id)
+                REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+            CONSTRAINT fk_forecast_evaluation_warehouse FOREIGN KEY (warehouse_id)
                 REFERENCES warehouses(id) ON DELETE RESTRICT ON UPDATE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """,
@@ -513,10 +563,98 @@ def _migration_5_isolate_legacy_m5_products(cur):
     )
 
 
+def _migration_6_forecast_run_parameters(cur):
+    """Store request settings so forecast runs can be reproduced and compared."""
+    if not _column_exists(cur, "forecast_runs", "parameters"):
+        cur.execute(
+            "ALTER TABLE forecast_runs ADD COLUMN parameters JSON NULL"
+        )
+
+
+def _migration_7_forecast_results_per_model(cur):
+    """Allow one comparison run to persist multiple model predictions per date."""
+    # The replacement starts with run_id too, so create it before removing the
+    # older key. On existing databases the legacy key may be the index InnoDB
+    # selected to support fk_forecast_result_run.
+    _ensure_index(
+        cur,
+        "forecast_results",
+        "uq_forecast_result_run_series_model_date",
+        "CREATE UNIQUE INDEX uq_forecast_result_run_series_model_date "
+        "ON forecast_results "
+        "(run_id, product_id, warehouse_id, forecast_date, model_name)",
+    )
+    legacy_index = cur.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = 'forecast_results'
+          AND index_name = 'uq_forecast_result_run_series_date'
+        """
+    ).fetchone()
+    if int(legacy_index["n"]) > 0:
+        cur.execute(
+            "ALTER TABLE forecast_results "
+            "DROP INDEX uq_forecast_result_run_series_date"
+        )
+
+
+def _migration_8_forecast_evaluation_metrics(cur):
+    """Persist immutable per-series metrics for fixed M5 benchmark runs."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS forecast_evaluation_metrics (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            run_id BIGINT NOT NULL,
+            product_id INT NOT NULL,
+            warehouse_id INT NOT NULL,
+            model_key VARCHAR(50) NOT NULL,
+            model_name VARCHAR(50) NOT NULL,
+            model_version VARCHAR(30) NOT NULL,
+            observation_count SMALLINT UNSIGNED NOT NULL,
+            actual_demand_total DECIMAL(20,2) NOT NULL,
+            absolute_error_total DECIMAL(20,4) NOT NULL,
+            mae DECIMAL(20,4) NOT NULL,
+            rmse DECIMAL(20,4) NOT NULL,
+            wape_pct DECIMAL(20,4) NULL,
+            bias DECIMAL(20,4) NOT NULL,
+            mase DECIMAL(20,4) NULL,
+            naive_mae_scale DECIMAL(20,4) NULL,
+            zero_demand_holdout TINYINT NOT NULL DEFAULT 0,
+            generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_forecast_evaluation_run_series_model
+                (run_id, product_id, warehouse_id, model_key),
+            KEY idx_forecast_evaluation_run_model (run_id, model_key),
+            CONSTRAINT ck_forecast_evaluation_observations
+                CHECK (observation_count > 0),
+            CONSTRAINT ck_forecast_evaluation_actual_total
+                CHECK (actual_demand_total >= 0),
+            CONSTRAINT ck_forecast_evaluation_absolute_error
+                CHECK (absolute_error_total >= 0),
+            CONSTRAINT ck_forecast_evaluation_mae CHECK (mae >= 0),
+            CONSTRAINT ck_forecast_evaluation_rmse CHECK (rmse >= 0),
+            CONSTRAINT ck_forecast_evaluation_wape CHECK (wape_pct IS NULL OR wape_pct >= 0),
+            CONSTRAINT ck_forecast_evaluation_zero_holdout
+                CHECK (zero_demand_holdout IN (0, 1)),
+            CONSTRAINT fk_forecast_evaluation_run FOREIGN KEY (run_id)
+                REFERENCES forecast_runs(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+            CONSTRAINT fk_forecast_evaluation_product FOREIGN KEY (product_id)
+                REFERENCES products(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+            CONSTRAINT fk_forecast_evaluation_warehouse FOREIGN KEY (warehouse_id)
+                REFERENCES warehouses(id) ON DELETE RESTRICT ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+
 SCHEMA_MIGRATIONS = {
     3: _migration_3_forecasting_schema,
     4: _migration_4_forecasting_hardening,
     5: _migration_5_isolate_legacy_m5_products,
+    6: _migration_6_forecast_run_parameters,
+    7: _migration_7_forecast_results_per_model,
+    8: _migration_8_forecast_evaluation_metrics,
 }
 
 

@@ -18,6 +18,7 @@ const Customers = React.lazy(() => import("./pages/Customers"));
 const Users = React.lazy(() => import("./pages/Users"));
 const Permissions = React.lazy(() => import("./pages/Permissions"));
 const AuditLog = React.lazy(() => import("./pages/AuditLog"));
+const Forecasting = React.lazy(() => import("./pages/Forecasting"));
 
 function PageFallback() {
   return (
@@ -153,6 +154,7 @@ function AppShell() {
                 <Route path="/suppliers" element={<PermissionRoute module="suppliers"><Suppliers /></PermissionRoute>} />
                 <Route path="/customers" element={<PermissionRoute module="customers"><Customers /></PermissionRoute>} />
                 <Route path="/activity" element={<PermissionRoute module="reports"><Activity /></PermissionRoute>} />
+                <Route path="/forecasts" element={<PermissionRoute module="reports"><Forecasting /></PermissionRoute>} />
                 <Route path="/users" element={<PermissionRoute module="admin"><Users /></PermissionRoute>} />
                 <Route path="/permissions" element={<PermissionRoute module="admin"><Permissions /></PermissionRoute>} />
                 <Route path="/audit" element={<PermissionRoute module="reports"><AuditLog /></PermissionRoute>} />

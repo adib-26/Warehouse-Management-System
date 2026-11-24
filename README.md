@@ -23,6 +23,7 @@ NovaLedger is designed for organizations that require secure and efficient inven
 * Customer management
 * File attachment support for shipment documents
 * Dashboard with inventory statistics and recent activities
+* Warehouse-level rolling-average and ARIMA forecasting with isolated M5 sample data, zero-demand preservation, and safe fallbacks
 * User and permission management
 * Docker support with an Nginx frontend, loopback-only published ports, and a persistent data volume
 * GitHub Actions checks for the API tests, frontend build, and a container smoke test
@@ -46,6 +47,7 @@ PythonProject/
 │   ├── main.py
 │   ├── config.py
 │   ├── database.py
+│   ├── forecasting_models.py
 │   ├── file_utils.py
 │   ├── security.py
 │   ├── schemas.py
@@ -62,6 +64,8 @@ PythonProject/
 │       ├── customers.py
 │       ├── inbound.py
 │       ├── outbound.py
+│       ├── warehouses.py
+│       ├── forecasting.py
 │       └── attachments.py
 │
 └── frontend/
@@ -87,6 +91,7 @@ PythonProject/
             ├── Suppliers.jsx
             ├── Customers.jsx
             ├── Activity.jsx
+            ├── Forecasting.jsx
             ├── Users.jsx
             ├── Permissions.jsx
             └── AuditLog.jsx
@@ -123,6 +128,7 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Authentication   | JWT (PyJWT), bcrypt        |
 | Database         | MySQL Community Edition    |
 | File Processing  | python-multipart, openpyxl |
+| Forecasting      | statsmodels ARIMA          |
 | Server           | Uvicorn                    |
 | Containerization | Docker                     |
 | Orchestration    | Docker Compose             |
@@ -376,6 +382,11 @@ The version 5 migration adds `forecast_demand_history`, `forecast_results`,
 `forecast_m5_imports`. It reuses NovaLedger’s existing `products` table and
 adds one shared `warehouses` master. Forecast tables use InnoDB, foreign keys,
 nonnegative quantity checks, and product/warehouse/date uniqueness.
+Version 6 adds request parameters to forecast runs so their source, cutoff,
+history window, and horizon remain visible for later review. Version 7 lets one
+comparison run save predictions from multiple models for the same product,
+warehouse, and test date. Version 8 adds immutable per-series metric reports
+for fixed M5 benchmark evaluations.
 
 New outbound dispatches must select a real warehouse in the web app. The
 shipment, stock decrement, stock movement, and daily `WMS` demand are written
@@ -396,6 +407,118 @@ warehouse, and WMS dispatches reject those test records. Imported Walmart sales
 only write forecast mappings, import audit rows, and `M5` demand history; they
 never write `products.quantity`, outbound shipments, or stock movements.
 Zero-sales days are retained.
+
+### Rolling-average forecast
+
+The first model is available at `POST /v1/forecasts/rolling-average`. It uses
+the latest available demand date as its default `as_of_date`, calculates the
+sum of demand over the selected trailing window divided by the fixed number of
+calendar days, and writes one prediction per product/warehouse/date to
+`forecast_results`. Supported windows are 7, 14, and 30 days; the default is
+7 days. Missing WMS dates count as zero demand. The default horizon is one day;
+longer horizons repeat the same average for each future date. Each run uses a
+stable, deterministic sample of up to 1,000 eligible series (configurable with
+`series_limit`) so even a 90-day run remains bounded at 90,000 saved rows.
+
+For example, run the 7-day model on the isolated M5 sample:
+
+```json
+{
+  "source": "M5",
+  "window_days": 7,
+  "horizon_days": 1
+}
+```
+
+The endpoint requires `reports` write permission. Review runs with
+`GET /v1/forecasts/runs` and predictions with
+`GET /v1/forecasts/runs/{run_id}/results`. M5 runs only use test products and
+test warehouses; WMS runs only use active operational products and warehouses.
+Users with reports read access can review forecasts from Reports → Forecasts in
+the web app; generating runs requires reports write permission.
+
+### ARIMA forecast
+
+Model B is available at `POST /v1/forecasts/arima` and fits Statsmodels
+`ARIMA(1,1,1)` independently for each product/warehouse series. The default
+training window is 365 trailing calendar days; 90- and 180-day windows are also
+available. The default forecast horizon is 14 days. Missing WMS dates are
+filled with zero demand in the daily series, and imported M5 zero-sales days
+remain in the training data. To bound the cost on large catalogs, a run fits at
+most 100 eligible series with ARIMA by default (configurable from 1 to 250).
+The overall deterministic forecast sample is independently bounded by
+`series_limit` (1 to 1,000), and all selected series outside the ARIMA fit cap
+still receive rolling-average fallback results.
+
+ARIMA is attempted only with at least 90 calendar observations and 10 days with
+nonzero demand. Short or intermittent histories, invalid model output, fit
+errors, and convergence warnings use the rolling-average fallback. Negative
+ARIMA predictions are clipped to zero. The API response reports how many
+series used each model, and each saved prediction records its actual model and
+version, including fallback rows. A missing Statsmodels installation is treated
+as a failed ARIMA run rather than silently mislabeling a fallback as ARIMA. To
+compare models, run both with the same
+source, cutoff date, and forecast horizon, then inspect the corresponding run
+results in Reports → Forecasts, or call `POST /v1/forecasts/compare` to compare
+the 7-day, 14-day, and 30-day rolling averages with ARIMA(1,1,1). All four
+models use the same training cutoff, product/warehouse sample, and historical
+holdout dates. The comparison reports MAE, RMSE, and WAPE, and saves each
+model's predictions as a forecast run. ARIMA fits are capped at 100 series by
+default (configurable to at most 250); other series receive a labeled 7-day
+rolling-average fallback. The comparison series sample is capped at 250 (100
+by default) so large M5 imports remain bounded. These simple models are a
+baseline for learning and comparison; ARIMA is not expected to outperform the
+rolling average for every intermittent-demand series. The comparison endpoint
+requires reports write permission. Each saved prediction includes its model
+name, model version, and UTC generation timestamp.
+For comparisons, `as_of_date` marks the last day of the holdout; training uses
+the selected number of calendar days immediately before that holdout.
+
+### Fixed M5 benchmark evaluation
+
+`POST /v1/forecasts/m5-evaluations` runs one of two non-editable, 28-day M5
+backtests. It accepts `experiment` (`development` or `final`), `series_limit`,
+and `max_arima_series`; it does not accept a custom cutoff, training span, or
+horizon.
+
+| Experiment | Training data | Test data | Calendar dates |
+| --- | --- | --- | --- |
+| Development validation | `d_1`–`d_1885` (1,885 days) | `d_1886`–`d_1913` (28 days) | 2011-01-29–2016-03-27 train; 2016-03-28–2016-04-24 test |
+| Final validation | `d_1`–`d_1913` (1,913 days) | `d_1914`–`d_1941` (28 days) | 2011-01-29–2016-04-24 train; 2016-04-25–2016-05-22 test |
+
+The development split uses the M5 validation-period prefix; final validation
+uses the evaluation-period range. The evaluator requires complete daily M5
+coverage for every selected product/warehouse series and fails rather than
+silently treating a missing imported day as zero. Zero-sale observations remain
+valid observations.
+
+For every selected product, warehouse, and model, it saves the 28 daily
+predictions in `forecast_results` and an immutable metric row in
+`forecast_evaluation_metrics`. `GET /v1/forecasts/runs/{run_id}/evaluation`
+returns the paginated per-series report. It includes MAE, RMSE, WAPE, Bias,
+and MASE, alongside actual holdout demand and model/version provenance. The
+report accepts optional `product_id`, `warehouse_id`, and `model_key` filters.
+
+Bias is mean `(prediction - actual)` in units per day, so a positive value
+means overprediction. MASE scales the test MAE by the mean absolute one-step
+naïve error on that series' training history; it is unavailable when that
+in-sample scale is zero. Per-series WAPE is calculated as
+`sum(abs(actual - prediction)) / sum(actual) * 100`; it is unavailable for a
+zero-demand holdout. Those series remain in the report with MAE, RMSE, and
+Bias, and are counted separately instead of being assigned a misleading
+percentage. Aggregate WAPE uses the same pooled numerator and denominator;
+aggregate MASE is the mean of defined per-series values.
+
+The 7-, 14-, and 30-day rolling averages and ARIMA(1,1,1) each forecast the
+same 28 test days from the full fixed training history. ARIMA still follows the
+safe fallback policy for sparse, capped, invalid, or non-converged series, and
+the saved model name identifies those fallback rows. The default deterministic
+sample is 100 series and the maximum is 250, so a report always states when it
+is a bounded sample rather than the full M5 catalog.
+
+Forecasting and comparisons acquire the same M5 import lock as the loader. If
+an M5 import is active, the API returns `409` instead of calculating from a
+partially committed dataset.
 
 For a manually maintained mapping file, run:
 
@@ -554,6 +677,18 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | POST   | `/v1/warehouses` | Create a real warehouse (administrator) |
 | PATCH  | `/v1/warehouses/{warehouse_id}` | Update or activate/deactivate a real warehouse (administrator) |
 
+### Forecasting — `/v1/forecasts`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| POST   | `/v1/forecasts/rolling-average` | Generate 7-, 14-, or 30-day rolling-average predictions |
+| POST   | `/v1/forecasts/arima` | Generate ARIMA(1,1,1) predictions with rolling-average fallback |
+| POST   | `/v1/forecasts/compare` | Save and score four model predictions on one historical holdout sample |
+| POST   | `/v1/forecasts/m5-evaluations` | Run a fixed 28-day M5 development or final backtest and save its report |
+| GET    | `/v1/forecasts/runs` | List forecasting runs |
+| GET    | `/v1/forecasts/runs/{run_id}/results` | List predictions for a run, optionally filtered by product or warehouse |
+| GET    | `/v1/forecasts/runs/{run_id}/evaluation` | List per-product, warehouse, and model metrics for a fixed M5 evaluation |
+
 ### Attachments — `/v1/attachments`
 
 | Method | Endpoint | Description |
@@ -593,6 +728,7 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | Suppliers   | Supplier directory               |
 | Customers   | Customer directory               |
 | Activity    | Inventory history                |
+| Forecasting | Rolling-average and ARIMA models |
 | Users       | User administration              |
 | Permissions | Role permission management       |
 | Audit Log   | System activity records          |

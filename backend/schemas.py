@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal, Optional
 from datetime import date
 
 
@@ -104,3 +104,68 @@ class WarehouseUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     address: Optional[str] = None
     active: Optional[bool] = None
+
+
+class RollingAverageForecastRequest(BaseModel):
+    source: Literal["M5", "WMS"]
+    window_days: Literal[7, 14, 30] = 7
+    series_limit: int = Field(default=1000, ge=1, le=1000)
+    horizon_days: int = Field(default=1, ge=1, le=90)
+    as_of_date: Optional[date] = None
+
+
+class ArimaForecastRequest(BaseModel):
+    source: Literal["M5", "WMS"]
+    history_days: Literal[90, 180, 365] = 365
+    fallback_window_days: Literal[7, 14, 30] = 7
+    series_limit: int = Field(default=1000, ge=1, le=1000)
+    max_arima_series: int = Field(default=100, ge=1, le=250)
+    horizon_days: int = Field(default=14, ge=1, le=90)
+    as_of_date: Optional[date] = None
+
+    @model_validator(mode="after")
+    def validate_series_limits(self):
+        if self.max_arima_series > self.series_limit:
+            # A caller that only narrows the overall sample should still get a
+            # useful request. Explicitly inconsistent caps remain an error.
+            if "max_arima_series" not in self.model_fields_set:
+                self.max_arima_series = self.series_limit
+                return self
+            raise ValueError("max_arima_series cannot exceed series_limit")
+        return self
+
+
+class ForecastComparisonRequest(BaseModel):
+    source: Literal["M5", "WMS"]
+    history_days: Literal[90, 180, 365] = 365
+    horizon_days: int = Field(default=14, ge=1, le=90)
+    series_limit: int = Field(default=100, ge=1, le=250)
+    max_arima_series: int = Field(default=100, ge=1, le=250)
+    as_of_date: Optional[date] = None
+
+    @model_validator(mode="after")
+    def validate_series_limits(self):
+        if self.max_arima_series > self.series_limit:
+            if "max_arima_series" not in self.model_fields_set:
+                self.max_arima_series = self.series_limit
+                return self
+            raise ValueError("max_arima_series cannot exceed series_limit")
+        return self
+
+
+class M5EvaluationRequest(BaseModel):
+    """Fixed M5 backtest protocol; dates and 28-day horizon are not configurable."""
+
+    model_config = ConfigDict(extra="forbid")
+    experiment: Literal["development", "final"] = "development"
+    series_limit: int = Field(default=100, ge=1, le=250)
+    max_arima_series: int = Field(default=100, ge=1, le=250)
+
+    @model_validator(mode="after")
+    def validate_series_limits(self):
+        if self.max_arima_series > self.series_limit:
+            if "max_arima_series" not in self.model_fields_set:
+                self.max_arima_series = self.series_limit
+                return self
+            raise ValueError("max_arima_series cannot exceed series_limit")
+        return self

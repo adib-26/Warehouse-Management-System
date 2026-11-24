@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from database import DatabaseError, get_db, init_db
 from config import get_cors_origins, UPLOAD_DIR, validate_runtime_config
-from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin, warehouses
+from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin, warehouses, forecasting
 
 
 @asynccontextmanager
@@ -37,6 +37,7 @@ app.include_router(customers.router, prefix=f"{V1}/customers", tags=["Customers"
 app.include_router(inbound.router, prefix=f"{V1}/inbound-shipments", tags=["Inbound Shipments"])
 app.include_router(outbound.router, prefix=f"{V1}/outbound-shipments", tags=["Outbound Shipments"])
 app.include_router(warehouses.router, prefix=f"{V1}/warehouses", tags=["Warehouses"])
+app.include_router(forecasting.router, prefix=f"{V1}/forecasts", tags=["Forecasting"])
 app.include_router(attachments.router, prefix=f"{V1}/attachments", tags=["Attachments"])
 app.include_router(admin.router, prefix=f"{V1}/admin", tags=["Admin"])
 app.include_router(admin.audit_router, prefix=f"{V1}/audit-logs", tags=["Audit"])
@@ -77,6 +78,7 @@ def v1_root():
             "inbound_shipments": f"{V1}/inbound-shipments",
             "outbound_shipments": f"{V1}/outbound-shipments",
             "warehouses": f"{V1}/warehouses",
+            "forecasts": f"{V1}/forecasts",
             "attachments": f"{V1}/attachments",
             "admin": f"{V1}/admin",
             "audit_logs": f"{V1}/audit-logs",

@@ -11,6 +11,7 @@ import {
   BuildingStorefrontIcon,
   ShieldCheckIcon,
   DocumentMagnifyingGlassIcon,
+  ChartBarIcon,
   ArrowRightStartOnRectangleIcon,
 } from "@heroicons/react/24/outline";
 import { NavLink } from "react-router-dom";
@@ -87,6 +88,10 @@ export default function Sidebar() {
           <NavLink to="/activity" className={linkClasses}>
             <ClipboardDocumentListIcon style={iconStyle} />
             <span>Activity Log</span>
+          </NavLink>
+          <NavLink to="/forecasts" className={linkClasses}>
+            <ChartBarIcon style={iconStyle} />
+            <span>Forecasts</span>
           </NavLink>
           <NavLink to="/audit" className={linkClasses}>
             <DocumentMagnifyingGlassIcon style={iconStyle} />
