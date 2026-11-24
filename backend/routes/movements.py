@@ -18,7 +18,8 @@ def list_movements(
     conn = get_db()
     cur = conn.cursor()
 
-    where = "WHERE 1=1"
+    # Keep the M5 test catalog out of operational reports and controls.
+    where = "WHERE p.is_forecast_test=0"
     params = []
 
     if action_type:
@@ -64,7 +65,8 @@ def create_movement(
     cur = conn.cursor()
 
     product = cur.execute(
-        "SELECT id, quantity, name FROM products WHERE sku=? AND deleted=0 AND archived=0",
+        "SELECT id, quantity, name FROM products "
+        "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
         (m.sku,),
     ).fetchone()
 
@@ -80,7 +82,8 @@ def create_movement(
     action_type = "STOCK_IN" if m.delta > 0 else "STOCK_OUT"
 
     cur.execute(
-        "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') WHERE id=? AND quantity + ? >= 0",
+        "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') "
+        "WHERE id=? AND is_forecast_test=0 AND quantity + ? >= 0",
         (m.delta, product["id"], m.delta),
     )
     if cur.rowcount != 1:
@@ -131,14 +134,16 @@ def delete_movement(movement_id: int, user: dict = Depends(require_permission("s
         )
 
     product = cur.execute(
-        "SELECT quantity FROM products WHERE id=?", (movement["product_id"],)
+        "SELECT quantity FROM products WHERE id=? AND is_forecast_test=0",
+        (movement["product_id"],),
     ).fetchone()
     if not product or product["quantity"] - movement["delta"] < 0:
         conn.close()
         raise HTTPException(status_code=409, detail="Reversing this movement would make stock negative")
 
     cur.execute(
-        "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') WHERE id=? AND quantity - ? >= 0",
+        "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') "
+        "WHERE id=? AND is_forecast_test=0 AND quantity - ? >= 0",
         (movement["delta"], movement["product_id"], movement["delta"]),
     )
     if cur.rowcount != 1:
@@ -162,19 +167,23 @@ def get_stats(user: dict = Depends(require_permission("reports", "read"))):
     cur = conn.cursor()
 
     total_products = cur.execute(
-        "SELECT COUNT(*) FROM products WHERE deleted=0 AND archived=0"
+        "SELECT COUNT(*) FROM products "
+        "WHERE deleted=0 AND archived=0 AND is_forecast_test=0"
     ).fetchone()[0]
 
     total_stock = cur.execute(
-        "SELECT COALESCE(SUM(quantity), 0) FROM products WHERE deleted=0 AND archived=0"
+        "SELECT COALESCE(SUM(quantity), 0) FROM products "
+        "WHERE deleted=0 AND archived=0 AND is_forecast_test=0"
     ).fetchone()[0]
 
     low_stock_count = cur.execute(
-        "SELECT COUNT(*) FROM products WHERE deleted=0 AND archived=0 AND quantity <= low_stock"
+        "SELECT COUNT(*) FROM products "
+        "WHERE deleted=0 AND archived=0 AND is_forecast_test=0 AND quantity <= low_stock"
     ).fetchone()[0]
 
     recent_activity = cur.execute(
-        "SELECT COUNT(*) FROM movements WHERE created_at >= datetime('now', '-7 days')"
+        "SELECT COUNT(*) FROM movements m JOIN products p ON p.id=m.product_id "
+        "WHERE p.is_forecast_test=0 AND m.created_at >= datetime('now', '-7 days')"
     ).fetchone()[0]
 
     conn.close()

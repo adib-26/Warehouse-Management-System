@@ -2,6 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { authFetch, downloadAttachment as apiDownloadAttachment } from "../api";
 import { useAuth } from "../AuthContext";
 
+function localDate() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
 function Dialog({ open, onClose, title, children }) {
   if (!open) return null;
   return (
@@ -21,13 +27,15 @@ export default function Outbound() {
   const { can } = useAuth();
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
+  const [warehouses, setWarehouses] = useState([]);
   const [shipments, setShipments] = useState([]);
   const [form, setForm] = useState({
     product_id: "",
     customer_id: "",
+    warehouse_id: "",
     quantity: 1,
     so_ref: "",
-    dispatch_date: new Date().toISOString().split("T")[0],
+    dispatch_date: localDate(),
     notes: "",
   });
   const [message, setMessage] = useState(null);
@@ -42,6 +50,7 @@ export default function Outbound() {
   const loadData = () => {
     authFetch(`/products?limit=500`).then(r => r.json()).then(d => setProducts(d.data)).catch(() => {});
     authFetch(`/customers?limit=500`).then(r => r.json()).then(d => setCustomers(d.data)).catch(() => {});
+    authFetch(`/warehouses?limit=500`).then(r => r.json()).then(d => setWarehouses(d.data)).catch(() => {});
     authFetch(`/outbound-shipments?limit=100`).then(r => r.json()).then(d => setShipments(d.data)).catch(() => {});
   };
 
@@ -52,17 +61,23 @@ export default function Outbound() {
 
   const logOutbound = async (e) => {
     e.preventDefault();
-    if (!form.product_id || !form.customer_id || form.quantity <= 0 || insufficientStock) return;
+    if (!form.product_id || !form.customer_id || !form.warehouse_id || form.quantity <= 0 || insufficientStock) return;
     try {
       const res = await authFetch(`/outbound-shipments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, product_id: Number(form.product_id), customer_id: Number(form.customer_id), quantity: Number(form.quantity) }),
+        body: JSON.stringify({
+          ...form,
+          product_id: Number(form.product_id),
+          customer_id: Number(form.customer_id),
+          warehouse_id: Number(form.warehouse_id),
+          quantity: Number(form.quantity),
+        }),
       });
       const data = await res.json();
       if (res.status === 201) {
         setMessage({ type: "success", text: `${data.quantity}x ${data.product_name} dispatched to ${data.customer_name}. Remaining stock: ${data.quantity_after}` });
-        setForm({ product_id: "", customer_id: "", quantity: 1, so_ref: "", dispatch_date: new Date().toISOString().split("T")[0], notes: "" });
+        setForm({ product_id: "", customer_id: "", warehouse_id: "", quantity: 1, so_ref: "", dispatch_date: localDate(), notes: "" });
         loadData();
       } else {
         setMessage({ type: "error", text: data.detail || "Failed to log outbound." });
@@ -190,7 +205,7 @@ export default function Outbound() {
                 <label className="input-label">Product *</label>
                 <select className="select" value={form.product_id} onChange={e => setForm({ ...form, product_id: e.target.value })} required>
                   <option value="">Select product...</option>
-                  {products.filter(p => !p.archived).map(p => (
+                  {products.filter(p => !p.archived && !p.is_forecast_test).map(p => (
                     <option key={p.id} value={p.id}>{p.name} ({p.sku}) - {p.quantity} in stock</option>
                   ))}
                 </select>
@@ -201,6 +216,15 @@ export default function Outbound() {
                   <option value="">Select customer...</option>
                   {customers.map(c => (
                     <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="input-group">
+                <label className="input-label">Warehouse *</label>
+                <select className="select" value={form.warehouse_id} onChange={e => setForm({ ...form, warehouse_id: e.target.value })} required>
+                  <option value="">Select warehouse...</option>
+                  {warehouses.map(w => (
+                    <option key={w.id} value={w.id}>{w.name} ({w.warehouse_code})</option>
                   ))}
                 </select>
               </div>
@@ -240,7 +264,7 @@ export default function Outbound() {
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button type="submit" className="btn btn-primary btn-sm" disabled={!form.product_id || !form.customer_id || form.quantity <= 0 || insufficientStock}>
+              <button type="submit" className="btn btn-primary btn-sm" disabled={!form.product_id || !form.customer_id || !form.warehouse_id || form.quantity <= 0 || insufficientStock}>
                 Log Outbound
               </button>
             </div>
@@ -268,7 +292,7 @@ export default function Outbound() {
             <div className="dropzone-text">
               <strong>Drag & drop a CSV/XLSX file here</strong>
               <br />
-              or click to browse. Must include: product_name or sku, customer_name, quantity.
+              or click to browse. Must include: product_name or sku, customer_name, quantity. Add warehouse_code to attribute WMS demand.
             </div>
             <input ref={fileInputRef} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleBulkUpload(e.target.files[0])} />
           </div>
@@ -283,6 +307,7 @@ export default function Outbound() {
               <th>Date</th>
               <th>Product</th>
               <th>Customer</th>
+              <th>Warehouse</th>
               <th>Qty</th>
               <th>SO Ref</th>
               <th>Attachments</th>
@@ -292,7 +317,7 @@ export default function Outbound() {
           <tbody>
             {shipments.length === 0 ? (
               <tr>
-                <td colSpan={7} className="empty-state">
+                <td colSpan={8} className="empty-state">
                   <div className="empty-state-text">No outbound records yet</div>
                 </td>
               </tr>
@@ -307,6 +332,14 @@ export default function Outbound() {
                     <div className="muted" style={{ fontSize: "0.75rem" }}>{s.product_sku}</div>
                   </td>
                   <td style={{ color: "var(--text-secondary)" }}>{s.customer_name}</td>
+                  <td style={{ color: "var(--text-secondary)" }}>
+                    {s.warehouse_name ? (
+                      <>
+                        <div>{s.warehouse_name}</div>
+                        <div className="muted" style={{ fontSize: "0.75rem" }}>{s.warehouse_code}</div>
+                      </>
+                    ) : <span className="muted">Legacy / unassigned</span>}
+                  </td>
                   <td>
                     <span style={{ fontWeight: 700, color: "var(--red, #ef4444)" }}>-{s.quantity}</span>
                   </td>
@@ -346,6 +379,11 @@ export default function Outbound() {
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Customer</div>
                 <div style={{ fontWeight: 600 }}>{detailShipment.customer_name}</div>
+              </div>
+              <div>
+                <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Warehouse</div>
+                <div style={{ fontWeight: 600 }}>{detailShipment.warehouse_name || "Legacy / unassigned"}</div>
+                {detailShipment.warehouse_code && <div className="muted" style={{ fontSize: "0.8rem" }}>{detailShipment.warehouse_code}</div>}
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Quantity</div>

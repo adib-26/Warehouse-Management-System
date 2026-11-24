@@ -8,6 +8,7 @@ import {
   ArrowUpTrayIcon,
   UserGroupIcon,
   UsersIcon,
+  BuildingStorefrontIcon,
   ShieldCheckIcon,
   DocumentMagnifyingGlassIcon,
   ArrowRightStartOnRectangleIcon,
@@ -105,6 +106,12 @@ export default function Sidebar() {
             <ShieldCheckIcon style={iconStyle} />
             <span>Permissions</span>
           </NavLink>
+          {can("outbound", "read") && (
+            <NavLink to="/warehouses" className={linkClasses}>
+              <BuildingStorefrontIcon style={iconStyle} />
+              <span>Warehouses</span>
+            </NavLink>
+          )}
         </div>
       )}
 

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "description": "M5 sample: 100 evenly spaced items across all 10 stores.",
+    "row_order": [
+      "mapping series order",
+      "date ascending within each series"
+    ]
+  },
+  "columns": [
+    {
+      "name": "item_id",
+      "type": "string",
+      "nullable": false,
+      "description": "M5 product identifier."
+    },
+    {
+      "name": "store_id",
+      "type": "string",
+      "nullable": false,
+      "description": "M5 store identifier."
+    },
+    {
+      "name": "date",
+      "type": "date (ISO 8601)",
+      "nullable": false,
+      "description": "Calendar date mapped from the M5 d_n identifier."
+    },
+    {
+      "name": "daily_sales",
+      "type": "integer",
+      "nullable": false,
+      "description": "Units sold for the item and store on the date; zeroes are retained."
+    }
+  ],
+  "source": {
+    "sales_file": "datasets/m5/processed/m5_daily_sales.csv.gz",
+    "calendar_file": "datasets/m5/raw/m5-forecasting-accuracy/calendar.csv",
+    "series_file": "datasets/m5/sample/m5_sample_1000_series.csv"
+  },
+  "coverage": {
+    "series_count": 1000,
+    "item_count": 100,
+    "store_count": 10,
+    "row_count": 1941000,
+    "day_count": 1941,
+    "date_start": "2011-01-29",
+    "date_end": "2016-05-22"
+  },
+  "daily_sales_summary": {
+    "total_units": 2158212,
+    "zero_sales_row_count": 1305621,
+    "nonzero_sales_row_count": 635379,
+    "min_units": 0,
+    "max_units": 244
+  },
+  "output": {
+    "file": "datasets/m5/sample/m5_sample_1000_daily_sales.csv.gz",
+    "sha256": "05664d323153530e8b23322e6feb1cd024f6df6b9020325003f1252ffb727e34",
+    "format": "csv",
+    "compression": {
+      "algorithm": "gzip",
+      "level": 6
+    }
+  }
+}

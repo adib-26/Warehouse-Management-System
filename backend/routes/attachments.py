@@ -14,18 +14,43 @@ def entity_module(entity_type: str) -> str:
     return entity_type if entity_type in MODULES else "products"
 
 
+def _is_operational_attachment(cur, attachment: dict) -> bool:
+    """Keep attachments linked to the M5 sandbox out of normal WMS APIs."""
+    if attachment["entity_type"] == "inbound":
+        row = cur.execute(
+            "SELECT ib.id FROM inbound_shipments ib "
+            "JOIN products p ON p.id=ib.product_id "
+            "WHERE ib.id=? AND p.is_forecast_test=0",
+            (attachment["entity_id"],),
+        ).fetchone()
+        return row is not None
+    if attachment["entity_type"] == "outbound":
+        row = cur.execute(
+            "SELECT ob.id FROM outbound_shipments ob "
+            "JOIN products p ON p.id=ob.product_id "
+            "WHERE ob.id=? AND p.is_forecast_test=0",
+            (attachment["entity_id"],),
+        ).fetchone()
+        return row is not None
+    return True
+
+
 @router.get("/{attachment_id}")
 def download_attachment(attachment_id: int, user: dict = Depends(get_current_user)):
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM attachments WHERE id=?", (attachment_id,)
-    ).fetchone()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT * FROM attachments WHERE id=?", (attachment_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        attachment = dict(row)
+        if not _is_operational_attachment(cur, attachment):
+            raise HTTPException(status_code=404, detail="Attachment not found")
+    finally:
+        conn.close()
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-
-    attachment = dict(row)
     check_permission(user, entity_module(attachment["entity_type"]), "read")
     file_path = UPLOAD_DIR / attachment["stored_name"]
 
@@ -54,6 +79,8 @@ def delete_attachment(attachment_id: int, user: dict = Depends(get_current_user)
             raise HTTPException(status_code=404, detail="Attachment not found")
 
         attachment = dict(row)
+        if not _is_operational_attachment(cur, attachment):
+            raise HTTPException(status_code=404, detail="Attachment not found")
         check_permission(user, entity_module(attachment["entity_type"]), "write")
         file_path = UPLOAD_DIR / attachment["stored_name"]
         try:

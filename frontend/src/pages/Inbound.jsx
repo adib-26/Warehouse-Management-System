@@ -2,6 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { authFetch, downloadAttachment as apiDownloadAttachment } from "../api";
 import { useAuth } from "../AuthContext";
 
+function localDate() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
 function Dialog({ open, onClose, title, children }) {
   if (!open) return null;
   return (
@@ -27,7 +33,7 @@ export default function Inbound() {
     supplier_id: "",
     quantity: 1,
     invoice_ref: "",
-    received_date: new Date().toISOString().split("T")[0],
+    received_date: localDate(),
     notes: "",
   });
   const [message, setMessage] = useState(null);
@@ -59,7 +65,7 @@ export default function Inbound() {
       const data = await res.json();
       if (res.status === 201) {
         setMessage({ type: "success", text: `${data.quantity}x ${data.product_name} received from ${data.supplier_name}. New stock: ${data.quantity_after}` });
-        setForm({ product_id: "", supplier_id: "", quantity: 1, invoice_ref: "", received_date: new Date().toISOString().split("T")[0], notes: "" });
+        setForm({ product_id: "", supplier_id: "", quantity: 1, invoice_ref: "", received_date: localDate(), notes: "" });
         loadData();
       } else {
         setMessage({ type: "error", text: data.detail || "Failed to log inbound." });
@@ -189,7 +195,7 @@ export default function Inbound() {
                 <label className="input-label">Product *</label>
                 <select className="select" value={form.product_id} onChange={e => setForm({ ...form, product_id: e.target.value })} required>
                   <option value="">Select product...</option>
-                  {products.filter(p => !p.archived).map(p => (
+                  {products.filter(p => !p.archived && !p.is_forecast_test).map(p => (
                     <option key={p.id} value={p.id}>{p.name} ({p.sku}) - {p.quantity} in stock</option>
                   ))}
                 </select>

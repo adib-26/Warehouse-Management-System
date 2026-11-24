@@ -101,7 +101,7 @@ export default function Stock() {
                 onChange={e => setSelectedSku(e.target.value)}
               >
                 <option value="">Select a product...</option>
-                {products.map(p => (
+                {products.filter(p => !p.is_forecast_test).map(p => (
                   <option key={p.sku} value={p.sku} disabled={p.archived}>
                     {p.name} ({p.sku}) — {p.quantity} in stock
                   </option>

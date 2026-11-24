@@ -14,6 +14,23 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: novaledger_test
+          MYSQL_USER: novaledger
+          MYSQL_PASSWORD: novaledger
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    env:
+      DATABASE_URL: mysql://novaledger:novaledger@127.0.0.1:3306/novaledger_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,6 +70,8 @@ jobs:
     env:
       SECRET_KEY: 0123456789abcdef0123456789abcdef
       INITIAL_ADMIN_PASSWORD: CorrectHorseBatteryStaple
+      MYSQL_ROOT_PASSWORD: ci-root-password
+      MYSQL_PASSWORD: ci-app-password
       BACKEND_PORT: 18000
       FRONTEND_PORT: 15173
     steps:

@@ -3,7 +3,10 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", BASE_DIR / "wms.db")).expanduser()
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "mysql://novaledger:novaledger@127.0.0.1:3306/novaledger",
+).strip()
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "uploads")).expanduser()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 SECRET_KEY = os.getenv("SECRET_KEY", "novaledger-dev-secret-change-me").strip()

@@ -1,8 +1,9 @@
-"""High-value API contract tests using an isolated SQLite database."""
+"""High-value API contract tests using an isolated MySQL database."""
 
 import csv
 import importlib
 import io
+import os
 import sys
 
 import pytest
@@ -24,6 +25,7 @@ APP_MODULES = (
     "routes.outbound",
     "routes.products",
     "routes.suppliers",
+    "routes.warehouses",
     "routes",
 )
 
@@ -32,7 +34,13 @@ APP_MODULES = (
 def client(tmp_path, monkeypatch):
     """Create a new app instance backed by disposable data for every test."""
     monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "wms.db"))
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        os.environ.get(
+            "DATABASE_URL",
+            "mysql://novaledger:novaledger@127.0.0.1:3306/novaledger_test",
+        ),
+    )
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("SECRET_KEY", "test-secret-key-that-is-long-enough-for-isolated-tests")
     monkeypatch.setenv("INITIAL_ADMIN_USERNAME", "admin")

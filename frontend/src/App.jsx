@@ -13,6 +13,7 @@ const Activity = React.lazy(() => import("./pages/Activity"));
 const Suppliers = React.lazy(() => import("./pages/Suppliers"));
 const Inbound = React.lazy(() => import("./pages/Inbound"));
 const Outbound = React.lazy(() => import("./pages/Outbound"));
+const Warehouses = React.lazy(() => import("./pages/Warehouses"));
 const Customers = React.lazy(() => import("./pages/Customers"));
 const Users = React.lazy(() => import("./pages/Users"));
 const Permissions = React.lazy(() => import("./pages/Permissions"));
@@ -148,6 +149,7 @@ function AppShell() {
                 <Route path="/stock" element={<PermissionRoute module="stock"><Stock /></PermissionRoute>} />
                 <Route path="/inbound" element={<PermissionRoute module="inbound"><Inbound /></PermissionRoute>} />
                 <Route path="/outbound" element={<PermissionRoute module="outbound"><Outbound /></PermissionRoute>} />
+                <Route path="/warehouses" element={<PermissionRoute module="outbound"><Warehouses /></PermissionRoute>} />
                 <Route path="/suppliers" element={<PermissionRoute module="suppliers"><Suppliers /></PermissionRoute>} />
                 <Route path="/customers" element={<PermissionRoute module="customers"><Customers /></PermissionRoute>} />
                 <Route path="/activity" element={<PermissionRoute module="reports"><Activity /></PermissionRoute>} />

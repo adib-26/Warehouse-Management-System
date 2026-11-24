@@ -188,9 +188,9 @@ def update_permissions(update: PermissionMatrixUpdate, user: dict = Depends(requ
         cur.execute(
             """
             INSERT INTO permissions (role, module, can_read, can_write, can_delete)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(role, module) DO UPDATE SET can_read=excluded.can_read,
-                can_write=excluded.can_write, can_delete=excluded.can_delete
+            VALUES (?, ?, ?, ?, ?) AS new_permission
+            ON DUPLICATE KEY UPDATE can_read=new_permission.can_read,
+                can_write=new_permission.can_write, can_delete=new_permission.can_delete
             """,
             (e.role, e.module, int(e.can_read), int(e.can_write), int(e.can_delete)),
         )

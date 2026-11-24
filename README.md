@@ -104,7 +104,7 @@ React + Vite + TailwindCSS
 FastAPI REST API (/v1)
             │
             ▼
-SQLite Database
+MySQL Community Edition
 ```
 
 The frontend authenticates users through the backend using JWT. Every protected request includes a bearer token that is validated before access is granted. Permissions are enforced according to the user's assigned role, while all significant actions are recorded in the audit log. Every resource is exposed under a single `/v1` prefix, so the same API that drives the React frontend can be called directly by scripts, Postman, or third-party integrations.
@@ -121,7 +121,7 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Backend          | FastAPI                    |
 | API Style        | RESTful, versioned (`/v1`) |
 | Authentication   | JWT (PyJWT), bcrypt        |
-| Database         | SQLite                     |
+| Database         | MySQL Community Edition    |
 | File Processing  | python-multipart, openpyxl |
 | Server           | Uvicorn                    |
 | Containerization | Docker                     |
@@ -188,12 +188,7 @@ Access the application:
 | Health check      | http://localhost:8000/health (local only) |
 | API Documentation | http://localhost:8000/docs (local only) |
 
-Docker serves a built React frontend through Nginx. It stores the SQLite
-database and uploaded files in the `warehouse-data` named volume, so they
-survive container recreation. Stop the stack with `docker compose down`. Add
-`-v` only when you intend to delete that data. The frontend proxies `/v1` to the
-backend, so it works through one browser origin by default. `VITE_API_URL` is an
-optional build-time override for a separately hosted public API.
+Docker serves a built React frontend through Nginx. MySQL Community Edition stores the inventory database in the `mysql-data` volume. Uploaded files stay in the `warehouse-data` volume. Both survive container recreation. Stop the stack with `docker compose down`. Add `-v` only when you intend to delete that data. The frontend proxies `/v1` to the backend, so it works through one browser origin by default. `VITE_API_URL` is an optional build-time override for a separately hosted public API.
 
 Both published ports bind to `127.0.0.1` by default. If port 8000 or 5173 is
 already in use, set `BACKEND_PORT` or `FRONTEND_PORT` in `.env`; the container
@@ -201,8 +196,9 @@ ports remain 8000 and 80 respectively. Deliberately change a bind address only
 when a network design requires it.
 
 The API reads `APP_ENV`, `SECRET_KEY`, `INITIAL_ADMIN_USERNAME`,
-`INITIAL_ADMIN_PASSWORD`, `CORS_ORIGINS`, `DATABASE_PATH`, `UPLOAD_DIR`, and
-`MAX_UPLOAD_BYTES` from the environment. Production startup rejects the built-in
+`INITIAL_ADMIN_PASSWORD`, `CORS_ORIGINS`, `DATABASE_URL`, `MYSQL_PASSWORD`,
+`MYSQL_ROOT_PASSWORD`, `UPLOAD_DIR`, and `MAX_UPLOAD_BYTES` from the environment.
+`MYSQL_PASSWORD` is the password inside `DATABASE_URL`. Production startup rejects the built-in
 development signing key and weak first-run administrator passwords. Existing
 databases keep their current users; use the administration screen to change an
 existing account password. Changing `SECRET_KEY` invalidates all active JWTs.
@@ -211,19 +207,18 @@ rejected consistently at the configured limit.
 
 ### Database upgrades and backups
 
-SQLite schema versions are stored in `PRAGMA user_version` and applied during
-startup. Keep the `warehouse-data` volume when updating the application image.
-Before a production upgrade, create an online SQLite backup from the running
-container:
+Schema versions are stored in the `schema_migrations` table and applied during
+startup. Keep the `mysql-data` volume when updating the application image.
+Before a production upgrade, dump the database:
 
 ```bash
-docker compose exec -T backend python -c "import sqlite3; source=sqlite3.connect('/data/wms.db'); backup=sqlite3.connect('/data/wms-pre-upgrade.db'); source.backup(backup); backup.close(); source.close()"
+docker compose exec -T mysql mysqldump -unovaledger -p"$MYSQL_PASSWORD" novaledger > novaledger-pre-upgrade.sql
 ```
 
-Future schema changes belong in numbered functions in `backend/database.py`;
-increment `SCHEMA_VERSION` and register each migration in `SCHEMA_MIGRATIONS`.
-Never edit an already released migration, since existing installations have
-recorded which versions have run.
+Future schema changes belong in numbered migration functions in
+`backend/database.py`. Increment `SCHEMA_VERSION`, register the function in
+`SCHEMA_MIGRATIONS`, and do not edit a migration that existing installations
+have already applied.
 
 ### Production deployment notes
 
@@ -232,10 +227,7 @@ place a TLS-terminating reverse proxy (such as Caddy, Traefik, or a managed
 load balancer) in front of the frontend. Serve HTTPS before exposing the app;
 do not publish the backend directly. Enable HSTS only at that HTTPS boundary.
 
-The included database is SQLite and the application is designed for a single
-backend instance sharing one `warehouse-data` volume. SQLite supports one
-writer at a time; do not horizontally scale the backend or mount that volume on
-multiple hosts. Move to a server database before a multi-instance deployment.
+The application database is MySQL Community Edition. Point every backend instance at the same `DATABASE_URL` before running more than one API process. Do not share one MySQL data volume across hosts.
 
 ---
 
@@ -321,6 +313,157 @@ Open:
 http://localhost:5173
 ```
 
+### M5 forecasting dataset
+
+Place the M5 CSV files under `datasets/m5/raw/m5-forecasting-accuracy/`, then run:
+
+```bash
+python3 scripts/prepare_m5.py
+```
+
+The script converts `sales_train_evaluation.csv` into
+`datasets/m5/processed/m5_daily_sales.csv.gz`. It maps each `d_n` sales column
+to the corresponding date in `calendar.csv` and writes one row per item, store,
+and date with the columns `item_id`, `store_id`, `date`, and `daily_sales`.
+Rows retain zero sales, preserve the input series order, and sort dates within
+each series. The sales rows are streamed, so the full long-format dataset does
+not need to fit in memory. Gzip compression defaults to level 6;
+`--compression-level` adjusts the speed and output size tradeoff. Set `--output`
+to a `.csv` path for an uncompressed file.
+
+Each run also creates `m5_daily_sales.metadata.json` beside the dataset. The
+manifest records the schema, date coverage, row and series counts, sales summary,
+and SHA-256 checksums for the source and output files. The converter rejects
+missing or nonconsecutive M5 days, invalid calendar dates, malformed records,
+duplicate item/store series, and invalid sales values before replacing an
+existing output. Pass `--no-metadata` to omit the manifest.
+
+Before modeling, validate the processed file against the original sales and
+calendar data:
+
+```bash
+python3 scripts/validate_m5.py
+```
+
+The validator checks the four-column schema, duplicate item/store/date keys,
+calendar mapping, nonnegative integer sales, complete daily coverage for every
+series, and preservation of zero-sales rows. It also verifies the manifest
+checksums and summary when a manifest is present. Its reported mean includes
+zero-sales observations. For per-series average demand, include every date in
+the series when calculating the mean; a zero is a real demand observation and
+must remain in the denominator.
+
+With the included evaluation source, the generated dataset contains 59,181,090
+rows across 30,490 item/store series from 2011-01-29 through 2016-05-22. To
+prepare the validation period instead, use:
+
+```bash
+python3 scripts/prepare_m5.py \
+  --sales datasets/m5/raw/m5-forecasting-accuracy/sales_train_validation.csv \
+  --output datasets/m5/processed/m5_validation_daily_sales.csv.gz
+```
+
+Run the converter and validator regression checks with:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+```
+
+### Forecasting database
+
+The version 5 migration adds `forecast_demand_history`, `forecast_results`,
+`forecast_runs`, `product_reorder_settings`, `forecast_m5_mappings`, and
+`forecast_m5_imports`. It reuses NovaLedger’s existing `products` table and
+adds one shared `warehouses` master. Forecast tables use InnoDB, foreign keys,
+nonnegative quantity checks, and product/warehouse/date uniqueness.
+
+New outbound dispatches must select a real warehouse in the web app. The
+shipment, stock decrement, stock movement, and daily `WMS` demand are written
+in one transaction. CSV/XLSX outbound imports can include `warehouse_code`;
+without it the shipment remains valid but does not contribute warehouse-level
+forecast demand. Existing outbound records stay unchanged with a null
+warehouse because their original location cannot be inferred. The current
+inventory count remains product-level; warehouse assignment supplies demand
+attribution rather than separate warehouse stock balances.
+
+Administrators can create or deactivate real warehouses from the
+Administration → Warehouses page or through `/v1/warehouses`. M5 test warehouses do not appear
+there and cannot be used for WMS outbound transactions.
+
+M5 records are isolated in the same shared masters with `is_forecast_test=1`.
+The loader requires every M5 mapping to target an active test product and test
+warehouse, and WMS dispatches reject those test records. Imported Walmart sales
+only write forecast mappings, import audit rows, and `M5` demand history; they
+never write `products.quantity`, outbound shipments, or stock movements.
+Zero-sales days are retained.
+
+For a manually maintained mapping file, run:
+
+```bash
+python3 scripts/create_m5_mapping_template.py
+```
+
+Fill `product_id` and `warehouse_id` using active records marked
+`is_forecast_test=1`. Each M5 item/store series must map to its own
+product/warehouse pair. After the version 5 migration has run at backend
+startup, import the processed CSV with:
+
+```bash
+python3 scripts/load_m5_forecast.py \
+  --input datasets/m5/processed/m5_daily_sales.csv.gz \
+  --mapping datasets/m5/processed/m5_mapping.csv
+```
+
+The loader verifies the converter manifest by default, validates every source
+series, preserves zero demand, validates mappings, serializes imports with a
+MySQL lock, and records each attempt in `forecast_m5_imports`. Rerunning the
+same successful input and mapping is idempotent. To load a different source or
+mapping for a selected series, use `--replace`; it upserts the complete
+replacement first, then prunes only stale dates for those affected M5 series.
+An interrupted import therefore does not clear the previous series up front.
+
+A GitHub clone includes that same multiwarehouse sample, without the unused
+full sales and price files. The committed files are:
+
+- `datasets/m5/sample/m5_sample_1000_series.csv` — 100 evenly spaced items in all 10 stores (1,000 series)
+- `datasets/m5/sample/m5_sample_1000_daily_sales.csv.gz` — 1,941,000 daily rows from 2011-01-29 through 2016-05-22, including every zero-sales day
+- `datasets/m5/sample/m5_sample_1000_daily_sales.metadata.json` — row counts and checksum for the loader
+
+Recreate the test catalog and demand history on a fresh database:
+
+```bash
+python3 scripts/bootstrap_m5_test_catalog.py \
+  --sales datasets/m5/sample/m5_sample_1000_series.csv \
+  --output datasets/m5/processed/m5_mapping.csv \
+  --force
+python3 scripts/load_m5_forecast.py \
+  --input datasets/m5/sample/m5_sample_1000_daily_sales.csv.gz \
+  --mapping datasets/m5/processed/m5_mapping.csv \
+  --replace
+```
+
+Bootstrap creates only `is_forecast_test=1` products and warehouses. If the 40
+legacy M5 demo products are already in the database, it reuses them, marks them
+test-only, and leaves their quantities unchanged. The loader writes forecast
+mappings, the import audit row, and `M5` demand history. It does not change
+product quantities, outbound shipments, or stock movements. A fresh clone has
+no operational products until you add them in the app.
+
+To opt in to the full M5 data set, generate a full-catalog mapping and import
+all 30,490 series (59,181,090 rows):
+
+```bash
+python3 scripts/bootstrap_m5_test_catalog.py --output datasets/m5/processed/m5_mapping.csv --force
+python3 scripts/load_m5_forecast.py --input datasets/m5/processed/m5_daily_sales.csv.gz --mapping datasets/m5/processed/m5_mapping.csv --replace
+```
+
+The bootstrap uses the existing product and warehouse tables, creates only
+zero-stock records marked `is_forecast_test=1`, and writes a populated mapping
+CSV. It reuses legacy M5 demo products when present and preserves their stored
+quantities while marking them as test records. `scripts/import_m5.py` is retired
+because it created separate untracked M5 tables outside the NovaLedger
+forecast schema.
+
 ---
 
 # RESTful API Reference
@@ -402,6 +545,14 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | GET    | `/v1/outbound-shipments/{shipment_id}/attachments` | List attachments for a shipment |
 | POST   | `/v1/outbound-shipments/{shipment_id}/attachments` | Upload an attachment to a shipment |
 | POST   | `/v1/outbound-shipments/imports` | Bulk import outbound shipments from a file |
+
+### Warehouses — `/v1/warehouses`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| GET    | `/v1/warehouses` | List real active warehouses for outbound attribution |
+| POST   | `/v1/warehouses` | Create a real warehouse (administrator) |
+| PATCH  | `/v1/warehouses/{warehouse_id}` | Update or activate/deactivate a real warehouse (administrator) |
 
 ### Attachments — `/v1/attachments`
 

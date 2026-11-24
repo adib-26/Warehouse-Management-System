@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
 from fastapi.responses import StreamingResponse
-from sqlite3 import IntegrityError
-from database import get_db
+from database import IntegrityError, get_db
 from file_utils import read_upload
 from schemas import ProductCreate, ProductUpdate
 from security import require_permission, log_audit
@@ -31,7 +30,8 @@ def list_products(
     conn = get_db()
     cur = conn.cursor()
 
-    where = "WHERE deleted=0"
+    # M5 catalog records are a forecasting sandbox, never normal inventory.
+    where = "WHERE deleted=0 AND is_forecast_test=0"
     params = []
 
     if archived is True:
@@ -82,7 +82,7 @@ def export_products(
     archived: Optional[bool] = None,
     user: dict = Depends(require_permission("products", "read")),
 ):
-    where = "WHERE deleted=0"
+    where = "WHERE deleted=0 AND is_forecast_test=0"
     params = []
     where += " AND archived=?"
     params.append(1 if archived is True else 0)
@@ -102,7 +102,7 @@ def export_products(
 
     query = (
         f"SELECT sku, name, category, tags, description, quantity, low_stock, archived, created_at, updated_at "
-        f"FROM products {where} ORDER BY name COLLATE NOCASE, sku COLLATE NOCASE"
+        f"FROM products {where} ORDER BY name, sku"
     )
 
     def stream_csv():
@@ -141,7 +141,8 @@ def export_products(
 def get_product_facets(user: dict = Depends(require_permission("products", "read"))):
     conn = get_db()
     rows = conn.execute(
-        "SELECT DISTINCT category, tags FROM products WHERE deleted=0 ORDER BY category COLLATE NOCASE"
+        "SELECT DISTINCT category, tags FROM products "
+        "WHERE deleted=0 AND is_forecast_test=0 ORDER BY category"
     ).fetchall()
     conn.close()
 
@@ -162,7 +163,8 @@ def get_product_facets(user: dict = Depends(require_permission("products", "read
 def get_product(product_id: int, user: dict = Depends(require_permission("products", "read"))):
     conn = get_db()
     row = conn.execute(
-        "SELECT * FROM products WHERE id=? AND deleted=0", (product_id,)
+        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0",
+        (product_id,),
     ).fetchone()
     conn.close()
     if not row:
@@ -182,8 +184,9 @@ def create_product(
     try:
         cur.execute(
             """
-            INSERT INTO products (name, sku, description, category, tags, quantity, low_stock)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products
+                (name, sku, description, category, tags, quantity, low_stock, is_forecast_test)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (p.name, p.sku, p.description, p.category, p.tags, p.quantity, p.low_stock),
         )
@@ -213,7 +216,8 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
     cur = conn.cursor()
 
     existing = cur.execute(
-        "SELECT * FROM products WHERE id=? AND deleted=0", (product_id,)
+        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0",
+        (product_id,),
     ).fetchone()
     if not existing:
         conn.close()
@@ -240,7 +244,11 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values())
 
-    cur.execute(f"UPDATE products SET {set_clause}, updated_at=datetime('now') WHERE id=?", values + [product_id])
+    cur.execute(
+        f"UPDATE products SET {set_clause}, updated_at=datetime('now') "
+        "WHERE id=? AND is_forecast_test=0",
+        values + [product_id],
+    )
 
     quantity_delta = fields.get("quantity", existing["quantity"]) - existing["quantity"]
     if quantity_delta:
@@ -286,13 +294,18 @@ def delete_product(product_id: int, user: dict = Depends(require_permission("pro
     cur = conn.cursor()
 
     existing = cur.execute(
-        "SELECT * FROM products WHERE id=? AND deleted=0", (product_id,)
+        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0",
+        (product_id,),
     ).fetchone()
     if not existing:
         conn.close()
         raise HTTPException(status_code=404, detail="Product not found")
 
-    cur.execute("UPDATE products SET deleted=1, updated_at=datetime('now') WHERE id=?", (product_id,))
+    cur.execute(
+        "UPDATE products SET deleted=1, updated_at=datetime('now') "
+        "WHERE id=? AND is_forecast_test=0",
+        (product_id,),
+    )
 
     cur.execute(
         "INSERT INTO movements (product_id, action_type, reason, source) VALUES (?, 'DELETE', ?, 'catalog')",
@@ -334,8 +347,9 @@ async def import_products(file: UploadFile = File(...), user: dict = Depends(req
 
             cur.execute(
                 """
-                INSERT OR IGNORE INTO products (name, sku, description, category, tags, quantity, low_stock)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO products
+                    (name, sku, description, category, tags, quantity, low_stock, is_forecast_test)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     name,

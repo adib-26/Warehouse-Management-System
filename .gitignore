@@ -20,6 +20,18 @@ backend/uploads/
 frontend/node_modules/
 frontend/dist/
 
+# Unused M5 bulk files. Keep calendar.csv and the multi-store mapping.
+datasets/m5/raw/**/*.zip
+datasets/m5/raw/**/sales_train_validation.csv
+datasets/m5/raw/**/sales_train_evaluation.csv
+datasets/m5/raw/**/sell_prices.csv
+datasets/m5/raw/**/sample_submission.csv
+datasets/m5/processed/m5_daily_sales.csv
+datasets/m5/processed/m5_daily_sales.csv.gz
+datasets/m5/processed/m5_daily_sales.metadata.json
+datasets/m5/processed/m5_mapping.csv
+datasets/m5/processed/m5_mapping_50.csv
+
 # Local tooling
 .DS_Store
 .idea/

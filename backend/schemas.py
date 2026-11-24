@@ -60,7 +60,7 @@ class InboundCreate(BaseModel):
     supplier_id: int
     quantity: int = Field(gt=0)
     invoice_ref: str = ""
-    received_date: Optional[str] = None
+    received_date: Optional[date] = None
     notes: str = ""
 
 
@@ -85,7 +85,22 @@ class CustomerUpdate(BaseModel):
 class OutboundCreate(BaseModel):
     product_id: int
     customer_id: int
+    warehouse_id: Optional[int] = Field(default=None, gt=0)
     quantity: int = Field(gt=0)
     so_ref: str = ""
-    dispatch_date: Optional[str] = None
+    dispatch_date: Optional[date] = None
     notes: str = ""
+
+
+class WarehouseCreate(BaseModel):
+    warehouse_code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    address: str = ""
+    active: bool = True
+
+
+class WarehouseUpdate(BaseModel):
+    warehouse_code: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    address: Optional[str] = None
+    active: Optional[bool] = None
