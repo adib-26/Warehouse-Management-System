@@ -1,23 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
-
-function Dialog({ open, onClose, title, children }) {
-  if (!open) return null;
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content" onClick={(e) => e.stopPropagation()}>
-        <div className="dialog-header">
-          <h2 className="dialog-title">{title}</h2>
-          <button onClick={onClose} className="btn btn-ghost btn-xs" style={{ padding: "4px 8px", fontSize: 18 }}>
-            &times;
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
+import Dialog from "../components/Dialog";
+import { useToast, useConfirm } from "../components/FeedbackProvider";
+import PageHeader from "../components/PageHeader";
 
 export default function Suppliers() {
   const { can } = useAuth();
@@ -25,7 +11,8 @@ export default function Suppliers() {
   const [q, setQ] = useState("");
   const [form, setForm] = useState({ name: "", contact_person: "", email: "", phone: "", address: "", notes: "" });
   const [editing, setEditing] = useState(null);
-  const [dialog, setDialog] = useState(null);
+  const toast = useToast();
+  const confirm = useConfirm();
 
   const load = useCallback(() => {
     const params = q ? `?q=${encodeURIComponent(q)}` : "";
@@ -34,7 +21,8 @@ export default function Suppliers() {
 
   useEffect(() => { load(); }, [load]);
 
-  const showMsg = (title, body, variant = "success") => setDialog({ title, body, variant });
+  const showMsg = (title, body, variant = "success") =>
+    (variant === "error" ? toast.error(body) : toast.success(body));
 
   const addSupplier = async (e) => {
     e.preventDefault();
@@ -79,7 +67,13 @@ export default function Suppliers() {
   };
 
   const deleteSupplier = async (id, name) => {
-    if (!confirm(`Delete supplier "${name}"?`)) return;
+    const ok = await confirm({
+      title: "Delete supplier",
+      message: `Delete "${name}"? This cannot be undone.`,
+      confirmLabel: "Delete supplier",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await authFetch(`/suppliers/${id}`, { method: "DELETE" });
       load();
@@ -91,12 +85,7 @@ export default function Suppliers() {
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Suppliers</h1>
-          <p className="page-subtitle">Manage your supplier contacts</p>
-        </div>
-      </div>
+      <PageHeader eyebrow="Supply Chain" title="Suppliers" subtitle="Who you buy from" />
 
       {can("suppliers", "write") && (
       <form onSubmit={addSupplier} className="card" style={{ marginBottom: 20 }}>
@@ -152,7 +141,7 @@ export default function Suppliers() {
         </div>
       </div>
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Suppliers">
         <table>
           <thead>
             <tr>
@@ -236,13 +225,6 @@ export default function Suppliers() {
             </div>
           </div>
         )}
-      </Dialog>
-
-      <Dialog open={!!dialog} onClose={() => setDialog(null)} title={dialog?.variant === "error" ? "Error" : "Success"}>
-        <p style={{ color: "var(--text-secondary)" }}>{dialog?.body}</p>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-          <button className="btn btn-primary btn-sm" onClick={() => setDialog(null)}>OK</button>
-        </div>
       </Dialog>
     </section>
   );

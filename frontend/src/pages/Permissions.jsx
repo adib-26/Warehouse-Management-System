@@ -1,16 +1,19 @@
 import { useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
+import { useToast } from "../components/FeedbackProvider";
+import { responseErrorMessage } from "../format";
+import PageHeader from "../components/PageHeader";
 
 const ACTIONS = ["read", "write", "delete"];
 
 export default function Permissions() {
   const { can } = useAuth();
+  const toast = useToast();
   const [roles, setRoles] = useState([]);
   const [modules, setModules] = useState([]);
   const [matrix, setMatrix] = useState({});
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState(null);
   const [dirty, setDirty] = useState(false);
 
   const load = () => {
@@ -61,13 +64,13 @@ export default function Permissions() {
       });
       const data = await res.json();
       if (res.ok) {
-        setMessage({ type: "success", text: "Permission matrix saved. Changes take effect immediately." });
+        toast.success("Permission matrix saved. Changes take effect immediately.");
         load();
       } else {
-        setMessage({ type: "error", text: data.detail || "Could not save permissions." });
+        toast.error(responseErrorMessage(data, "Could not save permissions."));
       }
     } catch {
-      setMessage({ type: "error", text: "Could not reach the API." });
+      toast.error("Could not reach the API.");
     } finally {
       setSaving(false);
     }
@@ -77,60 +80,65 @@ export default function Permissions() {
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Permissions</h1>
-          <p className="page-subtitle">Read / write / delete access per role and module</p>
-        </div>
-        {canWrite && (
-          <button className="btn btn-primary btn-sm" onClick={save} disabled={saving || !dirty}>
-            {saving ? "Saving..." : "Save Changes"}
-          </button>
+      <PageHeader
+        eyebrow="Administration"
+        title="Permissions"
+        subtitle="What each role can do"
+        actions={canWrite && (
+          <>
+            {dirty && <span className="dirty-flag">Unsaved changes</span>}
+            <button className="btn btn-primary btn-sm" onClick={save} disabled={saving || !dirty}>
+              {saving ? "Saving..." : "Save Changes"}
+            </button>
+          </>
         )}
-      </div>
+      />
 
-      {message && (
-        <div className={`alert alert-${message.type}`} style={{ marginBottom: 20 }}>
-          <span>{message.text}</span>
-          <button className="btn btn-ghost btn-xs" style={{ padding: "2px 8px" }} onClick={() => setMessage(null)}>&times;</button>
-        </div>
-      )}
-
-      <div className="table-container">
-        <table>
+      <div className="table-container" tabIndex={0} role="region" aria-label="Permission matrix">
+        <table className="perm-grid">
           <thead>
             <tr>
-              <th>Module</th>
-              {roles.map(r => (
-                <th key={r} style={{ textAlign: "center", textTransform: "capitalize" }}>{r}</th>
+              <th rowSpan={2} scope="col">Module</th>
+              {roles.map(role => (
+                <th key={role} colSpan={ACTIONS.length} scope="colgroup" className="perm-role">{role}</th>
               ))}
+            </tr>
+            <tr>
+              {roles.flatMap(role => ACTIONS.map((action, index) => (
+                <th
+                  key={`${role}-${action}`}
+                  scope="col"
+                  className={`perm-sub${index === 0 ? " perm-sub--first" : ""}`}
+                >
+                  {action}
+                </th>
+              )))}
             </tr>
           </thead>
           <tbody>
             {modules.map(module => (
               <tr key={module}>
-                <td style={{ fontWeight: 600, textTransform: "capitalize" }}>{module}</td>
-                {roles.map(role => {
+                <th scope="row">{module}</th>
+                {roles.flatMap(role => {
                   const p = matrix[`${role}:${module}`] || {};
+                  // Admin access to the admin module stays on to prevent lockout.
                   const locked = role === "admin" && module === "admin";
-                  return (
-                    <td key={role} style={{ textAlign: "center" }}>
-                      <div style={{ display: "inline-flex", gap: 12 }}>
-                        {ACTIONS.map(action => (
-                          <label key={action} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, fontSize: "0.65rem", color: "var(--muted)", cursor: locked || !canWrite ? "not-allowed" : "pointer" }}>
-                            <input
-                              type="checkbox"
-                              checked={!!p[action]}
-                              disabled={locked || !canWrite}
-                              onChange={() => toggle(role, module, action)}
-                              style={{ accentColor: "var(--accent)" }}
-                            />
-                            {action.charAt(0).toUpperCase()}
-                          </label>
-                        ))}
-                      </div>
+                  return ACTIONS.map((action, index) => (
+                    <td
+                      key={`${role}-${action}`}
+                      className={`perm-cell${index === 0 ? " perm-cell--first" : ""}`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="tickbox"
+                        checked={!!p[action]}
+                        disabled={locked || !canWrite}
+                        aria-label={`${role} can ${action} ${module}`}
+                        title={locked ? "Locked to prevent administrator lockout" : undefined}
+                        onChange={() => toggle(role, module, action)}
+                      />
                     </td>
-                  );
+                  ));
                 })}
               </tr>
             ))}
@@ -139,7 +147,7 @@ export default function Permissions() {
       </div>
 
       <p className="muted" style={{ marginTop: 12, fontSize: "0.8125rem" }}>
-        R = read, W = write, D = delete. Admin access to the admin module is locked to prevent lockout.
+        Administrator access to the Administration module is locked to prevent lockout.
       </p>
     </section>
   );

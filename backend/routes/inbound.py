@@ -6,6 +6,7 @@ from schemas import InboundCreate
 from security import require_permission, log_audit
 from typing import Optional
 from datetime import date, datetime
+from quantity import as_quantity, quantity_for_json
 import csv
 import io
 import os
@@ -48,12 +49,17 @@ def create_inbound(
         cur = conn.cursor()
 
         product = cur.execute(
-            "SELECT id, name, quantity FROM products "
-            "WHERE id=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
+            "SELECT id, name, quantity, batch_tracking_enabled_at FROM products "
+            "WHERE id=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
             (ib.product_id,),
         ).fetchone()
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
+        if product["batch_tracking_enabled_at"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Receive stock for this product with POST /api/batches so its lot is recorded.",
+            )
 
         supplier = cur.execute(
             "SELECT id, name FROM suppliers WHERE id=? AND deleted=0",
@@ -121,7 +127,7 @@ def create_inbound(
     resource = dict(row)
     resource["product_name"] = product["name"]
     resource["supplier_name"] = supplier["name"]
-    resource["quantity_after"] = new_qty
+    resource["quantity_after"] = quantity_for_json(new_qty)
 
     response.headers["Location"] = f"/v1/inbound-shipments/{shipment_id}"
     return resource
@@ -290,7 +296,7 @@ async def import_inbound(file: UploadFile = File(...), user: dict = Depends(requ
                 or _cell_text(normalized.get("product_sku"))
             )
             supplier_name = _cell_text(normalized.get("supplier_name"))
-            quantity = int(normalized.get("quantity") or 0)
+            quantity = as_quantity(normalized.get("quantity"), allow_zero=False)
             invoice_ref = _cell_text(normalized.get("invoice_ref"))
             received_date = _import_date(normalized.get("received_date"), row_num)
             notes = _cell_text(normalized.get("notes"))
@@ -301,14 +307,14 @@ async def import_inbound(file: UploadFile = File(...), user: dict = Depends(requ
 
             if product_sku:
                 product = cur.execute(
-                    "SELECT id, name, quantity FROM products "
-                    "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
+                    "SELECT id, name, quantity, batch_tracking_enabled_at FROM products "
+                    "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
                     (product_sku,),
                 ).fetchone()
             elif product_name:
                 product = cur.execute(
-                    "SELECT id, name, quantity FROM products "
-                    "WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
+                    "SELECT id, name, quantity, batch_tracking_enabled_at FROM products "
+                    "WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
                     (product_name.lower(),),
                 ).fetchone()
             else:
@@ -317,6 +323,12 @@ async def import_inbound(file: UploadFile = File(...), user: dict = Depends(requ
 
             if not product:
                 errors.append(f"Row {row_num}: Product '{product_name or product_sku}' not found")
+                return
+
+            if product["batch_tracking_enabled_at"]:
+                errors.append(
+                    f"Row {row_num}: Use the batch API to receive stock for '{product['name']}'"
+                )
                 return
 
             supplier = cur.execute(

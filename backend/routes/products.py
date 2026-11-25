@@ -2,15 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFi
 from fastapi.responses import StreamingResponse
 from database import IntegrityError, get_db
 from file_utils import read_upload
-from schemas import ProductCreate, ProductUpdate
+from schemas import ProductCreate, ProductReorderSettingsRequest, ProductUpdate
 from security import require_permission, log_audit
 from typing import Optional
 import csv
 import io
 import os
 from datetime import date
+from decimal import Decimal
+from quantity import as_quantity
 
 router = APIRouter()
+compat_reorder_router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
 
@@ -216,7 +219,7 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
     cur = conn.cursor()
 
     existing = cur.execute(
-        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0",
+        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0 FOR UPDATE",
         (product_id,),
     ).fetchone()
     if not existing:
@@ -230,6 +233,25 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
 
     if "archived" in fields:
         fields["archived"] = 1 if fields["archived"] else 0
+
+    if "quantity" in fields and existing["batch_tracking_enabled_at"]:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Batch-tracked stock is managed through inventory batches.",
+        )
+
+    if (
+        fields.get("archived") == 1
+        and not existing["archived"]
+        and existing["batch_tracking_enabled_at"]
+        and Decimal(str(existing["quantity"])) > 0
+    ):
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="A product with batch-tracked stock cannot be archived until its stock is cleared.",
+        )
 
     if not fields:
         conn.close()
@@ -250,7 +272,10 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
         values + [product_id],
     )
 
-    quantity_delta = fields.get("quantity", existing["quantity"]) - existing["quantity"]
+    quantity_delta = (
+        Decimal(str(fields.get("quantity", existing["quantity"])))
+        - Decimal(str(existing["quantity"]))
+    )
     if quantity_delta:
         action_type = "STOCK_IN" if quantity_delta > 0 else "STOCK_OUT"
         cur.execute(
@@ -264,7 +289,7 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
             "stock",
             "product",
             product_id,
-            f"Adjusted '{existing['name']}' by {quantity_delta:+d} from the product editor",
+            f"Adjusted '{existing['name']}' by {quantity_delta:+.2f} from the product editor",
         )
 
     archive_changed = "archived" in fields and fields["archived"] != existing["archived"]
@@ -288,18 +313,109 @@ def update_product(product_id: int, p: ProductUpdate, user: dict = Depends(requi
     return dict(row)
 
 
+@compat_reorder_router.put("/{product_id}/reorder-settings")
+@router.put("/{product_id}/reorder-settings")
+def update_product_reorder_settings(
+    product_id: int,
+    settings: ProductReorderSettingsRequest,
+    user: dict = Depends(require_permission("products", "write")),
+):
+    """Create or update one product's reorder policy at a warehouse."""
+    conn = get_db()
+    try:
+        product = conn.execute(
+            "SELECT id, sku, name FROM products "
+            "WHERE id=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        warehouse = conn.execute(
+            "SELECT id, warehouse_code, name FROM warehouses "
+            "WHERE id=? AND active=1 AND is_forecast_test=0",
+            (settings.warehouse_id,),
+        ).fetchone()
+        if warehouse is None:
+            raise HTTPException(status_code=404, detail="Active warehouse not found")
+
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO product_reorder_settings
+                (product_id, warehouse_id, lead_time_days, safety_stock,
+                 review_period_days)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                lead_time_days=VALUES(lead_time_days),
+                safety_stock=VALUES(safety_stock),
+                review_period_days=VALUES(review_period_days)
+            """,
+            (
+                product_id,
+                settings.warehouse_id,
+                settings.lead_time_days,
+                settings.safety_stock,
+                settings.review_period_days,
+            ),
+        )
+        log_audit(
+            cur,
+            user,
+            "UPDATE",
+            "products",
+            "product_reorder_settings",
+            product_id,
+            (
+                f"Set reorder settings for {product['sku']} at "
+                f"{warehouse['warehouse_code']}: lead time "
+                f"{settings.lead_time_days} days, safety stock "
+                f"{settings.safety_stock:g}, review period "
+                f"{settings.review_period_days} days."
+            ),
+        )
+        conn.commit()
+        saved = conn.execute(
+            """
+            SELECT s.product_id, p.sku, p.name AS product_name,
+                   s.warehouse_id, w.warehouse_code, w.name AS warehouse_name,
+                   s.lead_time_days, s.safety_stock, s.review_period_days,
+                   s.updated_at
+            FROM product_reorder_settings s
+            JOIN products p ON p.id=s.product_id
+            JOIN warehouses w ON w.id=s.warehouse_id
+            WHERE s.product_id=? AND s.warehouse_id=?
+            """,
+            (product_id, settings.warehouse_id),
+        ).fetchone()
+        return dict(saved)
+    finally:
+        conn.close()
+
+
 @router.delete("/{product_id}", status_code=204)
 def delete_product(product_id: int, user: dict = Depends(require_permission("products", "delete"))):
     conn = get_db()
+    conn.execute("START TRANSACTION")
     cur = conn.cursor()
 
     existing = cur.execute(
-        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0",
+        "SELECT * FROM products WHERE id=? AND deleted=0 AND is_forecast_test=0 FOR UPDATE",
         (product_id,),
     ).fetchone()
     if not existing:
         conn.close()
         raise HTTPException(status_code=404, detail="Product not found")
+
+    tracked_batches = cur.execute(
+        "SELECT COUNT(*) AS n FROM inventory_batches WHERE product_id=?",
+        (product_id,),
+    ).fetchone()["n"]
+    if existing["batch_tracking_enabled_at"] or int(tracked_batches) > 0:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Products with batch history cannot be deleted; archive the product after clearing its stock.",
+        )
 
     cur.execute(
         "UPDATE products SET deleted=1, updated_at=datetime('now') "
@@ -339,11 +455,8 @@ async def import_products(file: UploadFile = File(...), user: dict = Depends(req
                 errors.append(f"Row {row_num}: Name and SKU are required")
                 return
 
-            quantity = int(data.get("quantity", 0) or 0)
-            low_stock = int(data.get("low_stock", 10) or 10)
-            if quantity < 0 or low_stock < 0:
-                errors.append(f"Row {row_num}: Quantity and low_stock must be zero or greater")
-                return
+            quantity = as_quantity(data.get("quantity", 0) or 0)
+            low_stock = as_quantity(data.get("low_stock", 10) or 10)
 
             cur.execute(
                 """

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="NovaLedger">
+  <rect x="1.75" y="1.75" width="28.5" height="28.5" rx="5" fill="#ffcb05" stroke="#0a0a0a" stroke-width="1.5"/>
+  <!-- N: two uprights and a diagonal -->
+  <path d="M10 23 V9 M22 23 V9 M10 9 L22 23" fill="none" stroke="#0a0a0a"
+        stroke-width="3.4" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>

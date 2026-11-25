@@ -2,51 +2,179 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
+import Dialog from "../components/Dialog";
+import { useToast, useConfirm } from "../components/FeedbackProvider";
+import { formatQuantity, responseErrorMessage } from "../format";
+import PageHeader from "../components/PageHeader";
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 300;
 
-function Dialog({ open, onClose, title, children }) {
-  if (!open) return null;
+const EMPTY_PRODUCT = {
+  name: "",
+  sku: "",
+  category: "",
+  tags: "",
+  quantity: 0,
+  description: "",
+  low_stock: 10,
+};
+
+function SearchIcon() {
   return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
-        <div className="dialog-header">
-          <h2 className="dialog-title">{title}</h2>
-          <button onClick={onClose} className="btn btn-ghost btn-xs" style={{ padding: "4px 8px", fontSize: 18 }}>&times;</button>
+    <svg className="search-field__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.5-3.5" />
+    </svg>
+  );
+}
+
+/**
+ * One form for both creating and editing. `mode` drives the two differences:
+ * new SKUs are upper-cased as they are typed, and a batch-tracked product's
+ * quantity is read-only because it is derived from its inventory batches.
+ */
+function ProductFormDialog({ form, onClose, onChange, onSubmit, submitting }) {
+  const open = !!form;
+  const values = form?.values ?? EMPTY_PRODUCT;
+  const isAdd = form?.mode === "add";
+  const batchTracked = !isAdd && !!values.batch_tracking_enabled_at;
+  const set = (patch) => onChange({ ...values, ...patch });
+
+  return (
+    <Dialog open={open} onClose={onClose} title={isAdd ? "New Product" : "Edit Product"} maxWidth={620}>
+      <form onSubmit={onSubmit}>
+        <div className="form-grid">
+          <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="input-label" htmlFor="product-name">Name *</label>
+            <input
+              id="product-name"
+              className="input"
+              placeholder="Product name"
+              value={values.name}
+              onChange={e => set({ name: e.target.value })}
+              required
+            />
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="product-sku">SKU *</label>
+            <input
+              id="product-sku"
+              className="input mono"
+              placeholder="ABC-123"
+              value={values.sku}
+              onChange={e => set({ sku: isAdd ? e.target.value.toUpperCase() : e.target.value })}
+              required
+            />
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="product-category">Category</label>
+            <input
+              id="product-category"
+              className="input"
+              placeholder="Category"
+              value={values.category || ""}
+              onChange={e => set({ category: e.target.value })}
+            />
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="product-quantity">On hand</label>
+            <input
+              id="product-quantity"
+              className="input mono"
+              type="number"
+              min={0}
+              step="0.01"
+              value={values.quantity}
+              disabled={batchTracked}
+              onChange={e => set({ quantity: Number(e.target.value) })}
+            />
+            {batchTracked && (
+              <span className="input-hint">Batch-tracked stock is updated through inventory batches.</span>
+            )}
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="product-min">Min (low-stock level)</label>
+            <input
+              id="product-min"
+              className="input mono"
+              type="number"
+              min={0}
+              step="0.01"
+              value={values.low_stock}
+              onChange={e => set({ low_stock: Number(e.target.value) })}
+            />
+          </div>
+          <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="input-label" htmlFor="product-tags">Tags</label>
+            <input
+              id="product-tags"
+              className="input"
+              placeholder="tag1, tag2"
+              value={values.tags || ""}
+              onChange={e => set({ tags: e.target.value })}
+            />
+            <span className="input-hint">Comma separated.</span>
+          </div>
+          <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="input-label" htmlFor="product-description">Description</label>
+            <textarea
+              id="product-description"
+              className="input textarea"
+              placeholder="Product description"
+              value={values.description || ""}
+              onChange={e => set({ description: e.target.value })}
+            />
+          </div>
         </div>
-        {children}
-      </div>
-    </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 22 }}>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
+            {submitting ? "Saving..." : isAdd ? "Add Product" : "Save Changes"}
+          </button>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 
 export default function Products() {
   const { can } = useAuth();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [searchParams] = useSearchParams();
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [facets, setFacets] = useState({ categories: [], tags: [] });
   const [q, setQ] = useState("");
+  // The list refetches as the query settles, so there is no Search button.
+  const [appliedQ, setAppliedQ] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [showLowStock, setShowLowStock] = useState(() => searchParams.get("low_stock") === "true");
   const [showArchived, setShowArchived] = useState(() => searchParams.get("archived") === "true");
-  const [newProduct, setNewProduct] = useState({ name: "", sku: "", category: "", tags: "", quantity: 0, description: "", low_stock: 10 });
-  const [editingProduct, setEditingProduct] = useState(null);
-  const [dialog, setDialog] = useState(null);
+  const [form, setForm] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [showAddForm, setShowAddForm] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setAppliedQ(q);
+      setOffset(0);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [q]);
 
   const getParams = useCallback(() => {
     const params = new URLSearchParams();
-    if (q) params.set("q", q);
+    if (appliedQ) params.set("q", appliedQ);
     if (categoryFilter) params.set("category", categoryFilter);
     if (tagFilter) params.set("tag", tagFilter);
     if (showLowStock) params.set("low_stock", "true");
     if (showArchived) params.set("archived", "true");
     return params;
-  }, [categoryFilter, q, showArchived, showLowStock, tagFilter]);
+  }, [appliedQ, categoryFilter, showArchived, showLowStock, tagFilter]);
 
   const load = useCallback(() => {
     const params = getParams();
@@ -61,86 +189,113 @@ export default function Products() {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    authFetch("/products/facets")
-      .then(r => r.json())
-      .then(setFacets)
-      .catch(() => {});
+    authFetch("/products/facets").then(r => r.json()).then(setFacets).catch(() => {});
   }, []);
 
-  const showDialog = (title, body, variant = "success") => setDialog({ title, body, variant });
+  const openAdd = () => setForm({ mode: "add", values: { ...EMPTY_PRODUCT } });
+  const openEdit = (product) => setForm({ mode: "edit", values: { ...product } });
 
-  const addProduct = async (e) => {
-    e.preventDefault();
+  const submitForm = async (event) => {
+    event.preventDefault();
+    if (!form) return;
+    setSubmitting(true);
+    const values = form.values;
     try {
-      const res = await authFetch(`/products`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newProduct),
-      });
-      const data = await res.json();
-      if (res.status === 201) {
-        setNewProduct({ name: "", sku: "", category: "", tags: "", quantity: 0, description: "", low_stock: 10 });
-        setShowAddForm(false);
-        load();
-        showDialog("Product added", `${newProduct.name} (${newProduct.sku}) has been created.`);
-      } else {
-        showDialog("Error", data.detail || "Could not add product.", "error");
-      }
-    } catch {
-      showDialog("Network error", "Could not reach the API.", "error");
-    }
-  };
-
-  const updateProduct = async () => {
-    if (!editingProduct) return;
-    try {
-      const res = await authFetch(`/products/${editingProduct.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingProduct),
-      });
-      if (res.ok) {
-        setEditingProduct(null);
-        load();
-        showDialog("Product updated", "Changes saved successfully.");
-      } else {
+      if (form.mode === "add") {
+        const res = await authFetch(`/products`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(values),
+        });
         const data = await res.json();
-        showDialog("Error", data.detail || "Could not update.", "error");
+        if (res.status === 201) {
+          setForm(null);
+          load();
+          toast.success(`${values.name} (${values.sku}) has been created.`);
+        } else {
+          toast.error(responseErrorMessage(data, "Could not add product."));
+        }
+      } else {
+        const res = await authFetch(`/products/${values.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: values.name,
+            sku: values.sku,
+            description: values.description,
+            category: values.category,
+            tags: values.tags,
+            low_stock: values.low_stock,
+            archived: values.archived,
+            // Omitted for batch-tracked products: the balance is derived.
+            ...(values.batch_tracking_enabled_at ? {} : { quantity: values.quantity }),
+          }),
+        });
+        if (res.ok) {
+          setForm(null);
+          load();
+          toast.success("Changes saved.");
+        } else {
+          const data = await res.json();
+          toast.error(responseErrorMessage(data, "Could not update product."));
+        }
       }
     } catch {
-      showDialog("Network error", "Could not reach the API.", "error");
+      toast.error("Could not reach the API.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const deleteProduct = async (id, name) => {
-    if (!confirm(`Delete "${name}"?`)) return;
+    const ok = await confirm({
+      title: "Delete product",
+      message: `Delete "${name}"? This cannot be undone.`,
+      confirmLabel: "Delete product",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
-      await authFetch(`/products/${id}`, { method: "DELETE" });
+      const res = await authFetch(`/products/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json();
+        toast.error(responseErrorMessage(data, "Could not delete product."));
+        return;
+      }
       load();
-      showDialog("Product deleted", `${name} has been removed.`);
+      toast.success(`${name} has been removed.`);
     } catch {
-      showDialog("Error", "Could not delete product.", "error");
+      toast.error("Could not delete product.");
     }
   };
 
-  const toggleArchive = async (p) => {
+  const toggleArchive = async (product) => {
     try {
-      await authFetch(`/products/${p.id}`, {
+      const res = await authFetch(`/products/${product.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ archived: !p.archived }),
+        body: JSON.stringify({ archived: !product.archived }),
       });
+      if (!res.ok) {
+        const data = await res.json();
+        toast.error(responseErrorMessage(data, "Could not change archive status."));
+        return;
+      }
       load();
+      toast.success(`${product.name} was ${product.archived ? "restored" : "archived"}.`);
     } catch {
-      showDialog("Error", "Could not toggle archive status.", "error");
+      toast.error("Could not change archive status.");
     }
   };
 
-  const handleFileUpload = async (file) => {
+  const handleFileUpload = async (event) => {
+    const file = event.currentTarget.files?.[0];
+    // Let an operator fix and re-pick the same file after a validation error.
+    event.currentTarget.value = "";
     if (!file) return;
     const ext = file.name.split(".").pop().toLowerCase();
     if (!["csv", "xlsx"].includes(ext)) {
-      showDialog("Invalid file", "Please upload a CSV or XLSX file.", "error");
+      toast.error("Please upload a CSV or XLSX file.");
       return;
     }
     setUploading(true);
@@ -149,13 +304,17 @@ export default function Products() {
       formData.append("file", file);
       const res = await authFetch(`/products/imports`, { method: "POST", body: formData });
       const data = await res.json();
-      showDialog(
-        "Upload complete",
-        `Imported ${data.imported} products.${data.total_errors > 0 ? ` ${data.total_errors} errors.` : ""}`
-      );
+      if (!res.ok) {
+        toast.error(responseErrorMessage(data, "Could not import the file."));
+        return;
+      }
+      const errors = Number(data.total_errors) || 0;
+      const message = `Imported ${data.imported} products.${errors > 0 ? ` ${errors} row${errors === 1 ? "" : "s"} rejected.` : ""}`;
+      if (errors > 0) toast.warning(message);
+      else toast.success(message);
       load();
     } catch {
-      showDialog("Upload failed", "Could not process the file.", "error");
+      toast.error("Could not process the file.");
     } finally {
       setUploading(false);
     }
@@ -166,7 +325,7 @@ export default function Products() {
       const res = await authFetch(`/products/export?${getParams()}`);
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        showDialog("Export failed", data.detail || "Could not export products.", "error");
+        toast.error(responseErrorMessage(data, "Could not export products."));
         return;
       }
       const blob = await res.blob();
@@ -179,33 +338,38 @@ export default function Products() {
       link.remove();
       URL.revokeObjectURL(url);
     } catch {
-      showDialog("Export failed", "Could not reach the API.", "error");
+      toast.error("Could not reach the API.");
     }
   };
 
+  const page = Math.floor(offset / PAGE_SIZE) + 1;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const canWrite = can("products", "write");
+
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Products</h1>
-          <p className="page-subtitle">Manage your inventory catalog</p>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn btn-secondary btn-sm" onClick={exportProducts}>Export CSV</button>
-          {can("products", "write") && (
-            <>
-            <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              Upload CSV/XLSX
-              <input type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleFileUpload(e.target.files[0])} />
-            </label>
-            <button className="btn btn-primary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>
-              {showAddForm ? "Cancel" : "+ Add Product"}
-            </button>
-            </>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Inventory"
+        title="Products"
+        subtitle="What you stock, and how much of it"
+        actions={
+          <>
+            <button className="btn btn-secondary btn-sm" onClick={exportProducts}>Export CSV</button>
+            {canWrite && (
+              <>
+                <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+                  </svg>
+                  Import
+                  <input className="file-input" type="file" accept=".csv,.xlsx" onChange={handleFileUpload} />
+                </label>
+                <button className="btn btn-primary btn-sm" onClick={openAdd}>Add Product</button>
+              </>
+            )}
+          </>
+        }
+      />
 
       {uploading && (
         <div className="card" style={{ marginBottom: 20 }}>
@@ -216,83 +380,72 @@ export default function Products() {
         </div>
       )}
 
-      {showAddForm && (
-        <form onSubmit={addProduct} className="card" style={{ marginBottom: 20 }}>
-          <div className="card-body">
-            <h3 className="section-title">New Product</h3>
-            <div className="form-grid">
-              <div className="input-group">
-                <label className="input-label">Name *</label>
-                <input className="input" placeholder="Product name" value={newProduct.name} onChange={e => setNewProduct({ ...newProduct, name: e.target.value })} required />
-              </div>
-              <div className="input-group">
-                <label className="input-label">SKU *</label>
-                <input className="input" placeholder="ABC-123" value={newProduct.sku} onChange={e => setNewProduct({ ...newProduct, sku: e.target.value.toUpperCase() })} required />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Category</label>
-                <input className="input" placeholder="Category" value={newProduct.category} onChange={e => setNewProduct({ ...newProduct, category: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Tags (comma separated)</label>
-                <input className="input" placeholder="tag1, tag2" value={newProduct.tags} onChange={e => setNewProduct({ ...newProduct, tags: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Quantity</label>
-                <input className="input" type="number" min={0} value={newProduct.quantity} onChange={e => setNewProduct({ ...newProduct, quantity: Number(e.target.value) })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Low Stock Threshold</label>
-                <input className="input" type="number" min={0} value={newProduct.low_stock} onChange={e => setNewProduct({ ...newProduct, low_stock: Number(e.target.value) })} />
-              </div>
-              <div className="input-group" style={{ gridColumn: "1 / -1" }}>
-                <label className="input-label">Description</label>
-                <input className="input" placeholder="Product description" value={newProduct.description} onChange={e => setNewProduct({ ...newProduct, description: e.target.value })} />
-              </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button type="submit" className="btn btn-primary btn-sm">Add Product</button>
-            </div>
-          </div>
-        </form>
-      )}
-
       <div className="card" style={{ marginBottom: 20 }}>
-        <div className="card-body" style={{ paddingBottom: 12 }}>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              className="input"
-              placeholder="Search name, SKU, or description..."
-              value={q}
-              onChange={e => { setQ(e.target.value); setOffset(0); }}
-              onKeyDown={e => e.key === "Enter" && load()}
-              style={{ flex: "1 1 200px", maxWidth: 360 }}
-            />
-            <select className="select" value={categoryFilter} onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }} style={{ width: "auto", minWidth: 140 }}>
+        <div className="card-body">
+          <div className="toolbar">
+            <span className="search-field">
+              <SearchIcon />
+              <input
+                className="input"
+                type="search"
+                aria-label="Search products"
+                placeholder="Search name, SKU, or description..."
+                value={q}
+                onChange={e => setQ(e.target.value)}
+              />
+            </span>
+
+            <select
+              className="select"
+              aria-label="Filter by category"
+              value={categoryFilter}
+              onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }}
+              style={{ width: "auto", minWidth: 150 }}
+            >
               <option value="">All categories</option>
               {facets.categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+
             {facets.tags.length > 0 && (
-              <select className="select" value={tagFilter} onChange={e => { setTagFilter(e.target.value); setOffset(0); }} style={{ width: "auto", minWidth: 140 }}>
+              <select
+                className="select"
+                aria-label="Filter by tag"
+                value={tagFilter}
+                onChange={e => { setTagFilter(e.target.value); setOffset(0); }}
+                style={{ width: "auto", minWidth: 130 }}
+              >
                 <option value="">All tags</option>
                 {facets.tags.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             )}
-            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
-              <input type="checkbox" checked={showLowStock} onChange={e => { setShowLowStock(e.target.checked); setOffset(0); }} style={{ accentColor: "var(--accent)" }} />
+
+            <label className="chip">
+              <input
+                className="chip__input"
+                type="checkbox"
+                checked={showLowStock}
+                onChange={e => { setShowLowStock(e.target.checked); setOffset(0); }}
+              />
               Low stock
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
-              <input type="checkbox" checked={showArchived} onChange={e => { setShowArchived(e.target.checked); setOffset(0); }} style={{ accentColor: "var(--accent)" }} />
+            <label className="chip">
+              <input
+                className="chip__input"
+                type="checkbox"
+                checked={showArchived}
+                onChange={e => { setShowArchived(e.target.checked); setOffset(0); }}
+              />
               Archived
             </label>
-            <button className="btn btn-secondary btn-sm" onClick={load}>Search</button>
-            <span className="muted" style={{ marginLeft: "auto" }}>{total} product{total !== 1 ? "s" : ""}</span>
+
+            <span className="muted toolbar__count" role="status">
+              {total} product{total !== 1 ? "s" : ""}
+            </span>
           </div>
         </div>
       </div>
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Products">
         <table>
           <thead>
             <tr>
@@ -300,8 +453,8 @@ export default function Products() {
               <th>SKU</th>
               <th>Category</th>
               <th>Tags</th>
-              <th>Qty</th>
-              <th>Threshold</th>
+              <th style={{ textAlign: "right" }}>On hand</th>
+              <th style={{ textAlign: "right" }}>Min</th>
               <th>Status</th>
               <th style={{ textAlign: "right" }}>Actions</th>
             </tr>
@@ -310,46 +463,62 @@ export default function Products() {
             {items.length === 0 ? (
               <tr>
                 <td colSpan={8} className="empty-state">
-                  <div className="empty-state-text">No products found</div>
+                  <div className="empty-state-text">No products match these filters</div>
                 </td>
               </tr>
             ) : (
               items.map(p => {
-                const isLow = p.quantity <= p.low_stock;
+                const quantity = Number(p.quantity);
+                const threshold = Number(p.low_stock);
+                const isLow = quantity <= threshold;
                 const tagList = p.tags ? p.tags.split(",").map(t => t.trim()).filter(Boolean) : [];
                 return (
-                  <tr key={p.id} style={{ opacity: p.archived ? 0.5 : 1 }}>
+                  <tr key={p.id} style={{ opacity: p.archived ? 0.55 : 1 }}>
                     <td>
                       <div style={{ fontWeight: 600 }}>{p.name}</div>
-                      {p.description && <div className="muted" style={{ fontSize: "0.8rem", marginTop: 2, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.description}</div>}
+                      {p.description && (
+                        <div className="muted" style={{ fontSize: "0.78rem", marginTop: 2, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {p.description}
+                        </div>
+                      )}
                     </td>
-                    <td><code style={{ fontSize: "0.8125rem", background: "var(--bg-surface-elevated)", padding: "2px 6px", borderRadius: 4 }}>{p.sku}</code></td>
-                    <td style={{ color: "var(--text-secondary)" }}>{p.category || "-"}</td>
+                    <td><span className="badge badge-neutral mono">{p.sku}</span></td>
+                    <td style={{ color: "var(--text-secondary)" }}>{p.category || "—"}</td>
                     <td>
-                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                        {tagList.map((t, i) => (
-                          <span key={i} className="badge badge-info">{t}</span>
-                        ))}
-                        {tagList.length === 0 && <span className="muted" style={{ fontSize: "0.8rem" }}>-</span>}
-                      </div>
-                    </td>
-                    <td style={{ fontWeight: 700, color: isLow ? "var(--red)" : "var(--text-primary)" }}>{p.quantity}</td>
-                    <td style={{ color: "var(--text-secondary)" }}>{p.low_stock}</td>
-                    <td>
-                      {p.archived ? (
-                        <span className="badge badge-warning">Archived</span>
-                      ) : isLow ? (
-                        <span className="badge badge-danger">Low stock</span>
+                      {tagList.length === 0 ? (
+                        <span className="muted">—</span>
                       ) : (
-                        <span className="badge badge-success">In stock</span>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                          {tagList.map(t => <span key={t} className="badge badge-info">{t}</span>)}
+                        </div>
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>
+                      <span className={`ledger-num${isLow ? " ledger-num--down" : ""}`}>{formatQuantity(quantity)}</span>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <span className="mono muted" style={{ fontVariantNumeric: "tabular-nums" }}>{formatQuantity(threshold)}</span>
+                    </td>
+                    <td>
+                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                        {p.archived ? (
+                          <span className="stamp stamp--archived">Archived</span>
+                        ) : isLow ? (
+                          <span className="stamp stamp--low">Low</span>
+                        ) : (
+                          <span className="stamp stamp--ok">In stock</span>
+                        )}
+                        {p.batch_tracking_enabled_at && <span className="stamp stamp--batch">Batch</span>}
+                      </div>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        {can("products", "write") && (
+                        {canWrite && (
                           <>
-                            <button className="btn btn-ghost btn-xs" onClick={() => setEditingProduct({ ...p })}>Edit</button>
-                            <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p)}>{p.archived ? "Unarchive" : "Archive"}</button>
+                            <button className="btn btn-ghost btn-xs" onClick={() => openEdit(p)}>Edit</button>
+                            <button className="btn btn-ghost btn-xs" onClick={() => toggleArchive(p)}>
+                              {p.archived ? "Restore" : "Archive"}
+                            </button>
                           </>
                         )}
                         {can("products", "delete") && (
@@ -365,65 +534,38 @@ export default function Products() {
         </table>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 4px", flexWrap: "wrap" }}>
+      <div className="pagination">
         <span className="muted">
-          {total === 0 ? "No products" : `Showing ${offset + 1}–${Math.min(offset + items.length, total)} of ${total}`}
+          {total === 0
+            ? "No products"
+            : `Showing ${offset + 1}–${Math.min(offset + items.length, total)} of ${total}`}
         </span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-secondary btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
-          <button className="btn btn-secondary btn-sm" disabled={offset + items.length >= total} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
+        <div className="pagination__controls">
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+          >
+            Previous
+          </button>
+          <span className="pagination__page">Page {page} of {pageCount}</span>
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={offset + items.length >= total}
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+          >
+            Next
+          </button>
         </div>
       </div>
 
-      <Dialog open={!!editingProduct} onClose={() => setEditingProduct(null)} title="Edit Product">
-        {editingProduct && (
-          <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <div className="input-group">
-                <label className="input-label">Name</label>
-                <input className="input" value={editingProduct.name} onChange={e => setEditingProduct({ ...editingProduct, name: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">SKU</label>
-                <input className="input" value={editingProduct.sku} onChange={e => setEditingProduct({ ...editingProduct, sku: e.target.value })} />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <div className="input-group">
-                  <label className="input-label">Category</label>
-                  <input className="input" value={editingProduct.category} onChange={e => setEditingProduct({ ...editingProduct, category: e.target.value })} />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">Quantity</label>
-                  <input className="input" type="number" value={editingProduct.quantity} onChange={e => setEditingProduct({ ...editingProduct, quantity: Number(e.target.value) })} />
-                </div>
-              </div>
-              <div className="input-group">
-                <label className="input-label">Tags</label>
-                <input className="input" value={editingProduct.tags} onChange={e => setEditingProduct({ ...editingProduct, tags: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Low Stock Threshold</label>
-                <input className="input" type="number" value={editingProduct.low_stock} onChange={e => setEditingProduct({ ...editingProduct, low_stock: Number(e.target.value) })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Description</label>
-                <textarea className="input textarea" value={editingProduct.description} onChange={e => setEditingProduct({ ...editingProduct, description: e.target.value })} />
-              </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setEditingProduct(null)}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={updateProduct}>Save Changes</button>
-            </div>
-          </div>
-        )}
-      </Dialog>
-
-      <Dialog open={!!dialog} onClose={() => setDialog(null)} title={dialog?.variant === "error" ? "Error" : "Success"}>
-        <p style={{ color: "var(--text-secondary)" }}>{dialog?.body}</p>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-          <button className="btn btn-primary btn-sm" onClick={() => setDialog(null)}>OK</button>
-        </div>
-      </Dialog>
+      <ProductFormDialog
+        form={form}
+        submitting={submitting}
+        onClose={() => setForm(null)}
+        onChange={values => setForm(current => (current ? { ...current, values } : current))}
+        onSubmit={submitForm}
+      />
     </section>
   );
 }

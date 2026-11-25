@@ -3,6 +3,7 @@ from database import get_db
 from schemas import MovementCreate
 from security import require_permission, log_audit
 from typing import Optional
+from decimal import Decimal
 
 router = APIRouter()
 
@@ -37,10 +38,12 @@ def list_movements(
 
     rows = cur.execute(
         f"""
-        SELECT m.id, m.product_id, m.action_type, m.delta, m.reason, m.source, m.created_at,
+        SELECT m.id, m.product_id, m.action_type, m.delta, m.reason, m.source,
+               m.batch_id, m.warehouse_id, w.warehouse_code, m.created_at,
                p.name, p.sku, p.tags
         FROM movements m
         JOIN products p ON p.id = m.product_id
+        LEFT JOIN warehouses w ON w.id=m.warehouse_id
         {where}
         ORDER BY m.id DESC LIMIT ? OFFSET ?
         """,
@@ -65,8 +68,8 @@ def create_movement(
     cur = conn.cursor()
 
     product = cur.execute(
-        "SELECT id, quantity, name FROM products "
-        "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0",
+        "SELECT id, quantity, name, batch_tracking_enabled_at FROM products "
+        "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
         (m.sku,),
     ).fetchone()
 
@@ -74,7 +77,14 @@ def create_movement(
         conn.close()
         raise HTTPException(status_code=404, detail="Product not found")
 
-    new_qty = product["quantity"] + m.delta
+    if product["batch_tracking_enabled_at"]:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Batch-tracked stock can only be changed through inventory batches.",
+        )
+
+    new_qty = Decimal(str(product["quantity"])) + m.delta
     if new_qty < 0:
         conn.close()
         raise HTTPException(status_code=400, detail="Insufficient stock")
@@ -96,7 +106,7 @@ def create_movement(
     )
     movement_id = cur.lastrowid
 
-    log_audit(cur, user, action_type, "stock", "product", product["id"], f"Adjusted '{product['name']}' by {m.delta:+d} ({m.reason or 'no reason'})")
+    log_audit(cur, user, action_type, "stock", "product", product["id"], f"Adjusted '{product['name']}' by {m.delta:+.2f} ({m.reason or 'no reason'})")
     conn.commit()
 
     row = cur.execute("SELECT * FROM movements WHERE id=?", (movement_id,)).fetchone()
@@ -105,7 +115,7 @@ def create_movement(
     resource = dict(row)
     resource["product_name"] = product["name"]
     resource["sku"] = m.sku
-    resource["quantity_after"] = new_qty
+    resource["quantity_after"] = int(new_qty) if new_qty == new_qty.to_integral_value() else float(new_qty)
     resource["low_stock_warning"] = new_qty <= 0
 
     response.headers["Location"] = f"/v1/movements/{movement_id}"
@@ -119,7 +129,8 @@ def delete_movement(movement_id: int, user: dict = Depends(require_permission("s
     cur = conn.cursor()
 
     movement = cur.execute(
-        "SELECT id, product_id, delta, source FROM movements WHERE id=?", (movement_id,)
+        "SELECT id, product_id, delta, source FROM movements WHERE id=? FOR UPDATE",
+        (movement_id,),
     ).fetchone()
 
     if not movement:
@@ -134,10 +145,17 @@ def delete_movement(movement_id: int, user: dict = Depends(require_permission("s
         )
 
     product = cur.execute(
-        "SELECT quantity FROM products WHERE id=? AND is_forecast_test=0",
+        "SELECT quantity, batch_tracking_enabled_at FROM products "
+        "WHERE id=? AND is_forecast_test=0 FOR UPDATE",
         (movement["product_id"],),
     ).fetchone()
-    if not product or product["quantity"] - movement["delta"] < 0:
+    if product and product["batch_tracking_enabled_at"]:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Manual movements cannot be reversed after batch tracking is enabled.",
+        )
+    if not product or Decimal(str(product["quantity"])) - Decimal(str(movement["delta"])) < 0:
         conn.close()
         raise HTTPException(status_code=409, detail="Reversing this movement would make stock negative")
 
@@ -152,7 +170,7 @@ def delete_movement(movement_id: int, user: dict = Depends(require_permission("s
 
     cur.execute("DELETE FROM movements WHERE id=?", (movement_id,))
 
-    log_audit(cur, user, "UNDO", "stock", "movement", movement_id, f"Reversed movement {movement_id} (delta {movement['delta']:+d})")
+    log_audit(cur, user, "UNDO", "stock", "movement", movement_id, f"Reversed movement {movement_id} (delta {movement['delta']:+.2f})")
     conn.commit()
     conn.close()
     return Response(status_code=204)

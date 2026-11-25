@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import math
@@ -13,18 +13,22 @@ from forecasting_models import (
     ARIMA_MIN_NONZERO_DAYS,
     ForecastOutcome,
     arima_forecast_with_fallback,
+    project_stockout,
     rolling_average_forecast,
 )
 from schemas import (
     ArimaForecastRequest,
     ForecastComparisonRequest,
+    ForecastRunRequest,
     M5EvaluationRequest,
     RollingAverageForecastRequest,
+    StockoutRiskRequest,
 )
 from security import log_audit, require_permission
 
 
 router = APIRouter()
+compat_router = APIRouter()
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Rolling average"
@@ -36,6 +40,10 @@ COMPARISON_RUN_MODEL_NAME = "Forecast comparison (4 models)"
 M5_EVALUATION_RUN_MODEL_NAME = "M5 fixed evaluation (4 models)"
 M5_IMPORT_LOCK_NAME = "novaledger_m5_forecast_import"
 M5_DAY_ONE = date(2011, 1, 29)
+# A normal forecast run is capped at 1,000 series. Ask the internal stockout
+# projection for every product at once so the alerts endpoint does not repeat
+# its full demand and inventory calculation for each result page.
+ALERT_PROJECTION_LIMIT = 10_000
 M5_EVALUATION_EXPERIMENTS = {
     "development": {
         "label": "Development validation",
@@ -54,6 +62,27 @@ M5_EVALUATION_EXPERIMENTS = {
         "test_end_day": 1941,
     },
 }
+
+
+def _operational_usable_batch_stock_sql() -> str:
+    """Return product-level stock that can actually be dispatched today.
+
+    Product ``quantity`` is the physical on-hand total for a batch-tracked
+    product. It intentionally includes blocked, expired, and inactive-site
+    lots for reconciliation. Forecast risk and low-stock alerts instead need
+    the portion that can be allocated to a new outbound shipment.
+    """
+    return """
+        SELECT b.product_id, SUM(b.remaining_quantity) AS available_stock
+        FROM inventory_batches b
+        JOIN warehouses bw ON bw.id=b.warehouse_id
+        WHERE b.status='available'
+          AND b.remaining_quantity>0
+          AND (b.expiry_date IS NULL OR b.expiry_date>=UTC_DATE())
+          AND bw.active=1
+          AND bw.is_forecast_test=0
+        GROUP BY b.product_id
+    """
 
 
 class ForecastRequestError(Exception):
@@ -785,7 +814,6 @@ def run_arima_forecast(
 ):
     """Fit ARIMA per eligible series, falling back safely when needed."""
     conn = get_db()
-    history_conn = None
     run_id = None
     m5_lock_acquired = False
     try:
@@ -877,17 +905,16 @@ def run_arima_forecast(
 
         candidate_histories = {}
         if arima_series_rows:
-            history_conn = get_db()
+            # Keep candidate histories on the same connection as series
+            # selection and rolling inputs. This prevents a concurrent
+            # backdated WMS dispatch from producing a mixed training snapshot.
             candidate_histories = _load_candidate_history(
-                history_conn,
+                conn,
                 request.source,
                 arima_series_rows,
                 history_start,
                 as_of_date,
             )
-        if history_conn is not None:
-            history_conn.close()
-            history_conn = None
         # All source reads are now in memory. Release the M5 importer before
         # the potentially long serial ARIMA fitting phase.
         _release_m5_import_lock(conn, m5_lock_acquired)
@@ -1034,16 +1061,11 @@ def run_arima_forecast(
         logger.exception("ARIMA forecast failed")
         raise
     finally:
-        for resource in (history_conn,):
-            if resource is not None:
-                try:
-                    resource.close()
-                except Exception:
-                    logger.debug("Could not close a forecast database resource", exc_info=True)
         _release_m5_import_lock(conn, m5_lock_acquired)
         conn.close()
 
 
+@compat_router.get("/runs")
 @router.get("/runs")
 def list_forecast_runs(
     source: Optional[Literal["M5", "WMS"]] = None,
@@ -1080,6 +1102,477 @@ def list_forecast_runs(
         conn.close()
 
 
+def _resolve_successful_forecast_run(conn, run_id, source):
+    if run_id is not None:
+        run = conn.execute(
+            "SELECT id, model_name, source, started_at, completed_at, status, "
+            "products_processed, error_message, parameters "
+            "FROM forecast_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Forecast run not found")
+        if source is not None and run["source"] != source:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Forecast run {run_id} uses source {run['source']}, not {source}.",
+            )
+    else:
+        where = "WHERE status='success'"
+        params = []
+        if source is not None:
+            where += " AND source=?"
+            params.append(source)
+        run = conn.execute(
+            "SELECT id, model_name, source, started_at, completed_at, status, "
+            "products_processed, error_message, parameters "
+            f"FROM forecast_runs {where} "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        if run is None:
+            detail = (
+                f"No successful {source} forecast run is available."
+                if source
+                else "No successful forecast run is available."
+            )
+            raise HTTPException(status_code=404, detail=detail)
+
+    if run["status"] != "success":
+        raise HTTPException(
+            status_code=409,
+            detail="Forecast results require a successfully completed run.",
+        )
+    return run
+
+
+def _forecast_result_model_filter(conn, run, model_name):
+    available = [
+        row["model_name"]
+        for row in conn.execute(
+            "SELECT DISTINCT model_name FROM forecast_results "
+            "WHERE run_id=? ORDER BY model_name",
+            (run["id"],),
+        ).fetchall()
+    ]
+    if not available:
+        raise HTTPException(status_code=409, detail="This run has no saved predictions.")
+
+    combined_arima_name = "ARIMA(1,1,1) + rolling fallback"
+    fallback_model_name = (
+        ARIMA_FALLBACK_MODEL_NAME
+        if run["model_name"] == ARIMA_MODEL_NAME
+        else "ARIMA(1,1,1) fallback"
+    )
+    arima_names = [
+        name
+        for name in (ARIMA_MODEL_NAME, fallback_model_name)
+        if name in available
+    ]
+    if model_name == combined_arima_name or (
+        model_name is None
+        and run["model_name"] == ARIMA_MODEL_NAME
+        and arima_names
+    ):
+        if not arima_names:
+            raise HTTPException(
+                status_code=422,
+                detail="The selected run does not contain ARIMA predictions.",
+            )
+        placeholders = ", ".join("?" for _ in arima_names)
+        return f"AND r.model_name IN ({placeholders})", arima_names, combined_arima_name
+
+    if model_name is None:
+        if len(available) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Select model_name for this multi-model run.",
+                    "available_model_names": available,
+                },
+            )
+        model_name = available[0]
+    elif model_name not in available:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "model_name is not present in this forecast run.",
+                "available_model_names": available,
+            },
+        )
+    return "AND r.model_name=?", [model_name], model_name
+
+
+@compat_router.get("/overview")
+@router.get("/overview")
+def get_forecast_overview(
+    source: Optional[Literal["M5", "WMS"]] = None,
+    user: dict = Depends(require_permission("reports", "read")),
+):
+    """Summarize forecast runs and the latest saved forecast for a source."""
+    conn = get_db()
+    try:
+        where = "WHERE 1=1"
+        params = []
+        if source is not None:
+            where += " AND source=?"
+            params.append(source)
+        run_counts = conn.execute(
+            f"""
+            SELECT COUNT(*) AS run_count,
+                   COALESCE(SUM(status='success'), 0) AS successful_runs,
+                   COALESCE(SUM(status='running'), 0) AS running_runs,
+                   COALESCE(SUM(status='failed'), 0) AS failed_runs
+            FROM forecast_runs {where}
+            """,
+            params,
+        ).fetchone()
+        latest_run = conn.execute(
+            "SELECT id, model_name, source, started_at, completed_at, status, "
+            "products_processed, error_message FROM forecast_runs "
+            f"{where} ORDER BY started_at DESC, id DESC LIMIT 1",
+            params,
+        ).fetchone()
+        latest_success = conn.execute(
+            "SELECT id, model_name, source, started_at, completed_at, status, "
+            "products_processed FROM forecast_runs "
+            "WHERE status='success' "
+            + ("AND source=? " if source is not None else "")
+            + "ORDER BY completed_at DESC, id DESC LIMIT 1",
+            [source] if source is not None else [],
+        ).fetchone()
+        forecast_summary = None
+        if latest_success is not None:
+            forecast_summary = dict(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS prediction_rows,
+                           COUNT(DISTINCT product_id) AS products,
+                           COUNT(DISTINCT forecast_date) AS forecast_days,
+                           MIN(forecast_date) AS forecast_start,
+                           MAX(forecast_date) AS forecast_end
+                    FROM forecast_results WHERE run_id=?
+                    """,
+                    (latest_success["id"],),
+                ).fetchone()
+            )
+        low_stock_count = conn.execute(
+            f"""
+            SELECT COUNT(*) AS product_count
+            FROM products p
+            LEFT JOIN ({_operational_usable_batch_stock_sql()}) batch_available
+              ON batch_available.product_id=p.id
+            WHERE p.deleted=0 AND p.archived=0 AND p.is_forecast_test=0
+              AND (
+                  CASE WHEN p.batch_tracking_enabled_at IS NOT NULL
+                       THEN COALESCE(batch_available.available_stock, 0)
+                       ELSE p.quantity
+                  END
+              ) <= p.low_stock
+            """
+        ).fetchone()["product_count"]
+        return {
+            "source": source,
+            "summary": dict(run_counts),
+            "latest_run": dict(latest_run) if latest_run is not None else None,
+            "latest_successful_run": (
+                dict(latest_success) if latest_success is not None else None
+            ),
+            "latest_forecast": forecast_summary,
+            "live_low_stock_products": (
+                None if source == "M5" else int(low_stock_count)
+            ),
+        }
+    finally:
+        conn.close()
+
+
+@compat_router.get("/products")
+@router.get("/products")
+def list_forecast_products(
+    run_id: Optional[int] = Query(default=None, gt=0),
+    source: Optional[Literal["M5", "WMS"]] = None,
+    model_name: Optional[str] = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(require_permission("reports", "read")),
+):
+    """List product-level forecast totals from a selected or latest run."""
+    conn = get_db()
+    try:
+        if run_id is None and source is None:
+            source = "WMS"
+        run = _resolve_successful_forecast_run(conn, run_id, source)
+        model_filter, model_params, selected_model = _forecast_result_model_filter(
+            conn, run, model_name
+        )
+        base_where = f"WHERE r.run_id=? {model_filter}"
+        base_params = [run["id"]] + model_params
+        total = conn.execute(
+            f"SELECT COUNT(DISTINCT r.product_id) AS total "
+            f"FROM forecast_results r {base_where}",
+            base_params,
+        ).fetchone()["total"]
+        rows = conn.execute(
+            f"""
+            SELECT p.id AS product_id, p.sku, p.name AS product_name,
+                   COUNT(DISTINCT r.forecast_date) AS forecast_days,
+                   MIN(r.forecast_date) AS forecast_start,
+                   MAX(r.forecast_date) AS forecast_end,
+                   SUM(r.predicted_demand) AS total_predicted_demand,
+                   SUM(r.predicted_demand) / NULLIF(COUNT(DISTINCT r.forecast_date), 0)
+                       AS average_daily_demand,
+                   COUNT(DISTINCT r.warehouse_id) AS warehouse_count
+            FROM forecast_results r
+            JOIN products p ON p.id=r.product_id
+            {base_where}
+            GROUP BY p.id, p.sku, p.name
+            ORDER BY p.sku, p.id
+            LIMIT ? OFFSET ?
+            """,
+            base_params + [limit, offset],
+        ).fetchall()
+        return {
+            "run": dict(run),
+            "model_name": selected_model,
+            "data": [dict(row) for row in rows],
+            "meta": {"total": total, "limit": limit, "offset": offset},
+        }
+    finally:
+        conn.close()
+
+
+@compat_router.get("/products/{product_id}")
+@router.get("/products/{product_id}")
+def get_product_forecast(
+    product_id: int,
+    run_id: Optional[int] = Query(default=None, gt=0),
+    source: Optional[Literal["M5", "WMS"]] = None,
+    model_name: Optional[str] = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(require_permission("reports", "read")),
+):
+    """Return one product's daily forecast rows from a selected or latest run."""
+    conn = get_db()
+    try:
+        if run_id is None and source is None:
+            source = "WMS"
+        run = _resolve_successful_forecast_run(conn, run_id, source)
+        model_filter, model_params, selected_model = _forecast_result_model_filter(
+            conn, run, model_name
+        )
+        base_where = f"WHERE r.run_id=? AND r.product_id=? {model_filter}"
+        base_params = [run["id"], product_id] + model_params
+        summary = conn.execute(
+            f"""
+            SELECT COUNT(*) AS prediction_rows,
+                   COUNT(DISTINCT r.forecast_date) AS forecast_days,
+                   COUNT(DISTINCT r.warehouse_id) AS warehouse_count,
+                   MIN(r.forecast_date) AS forecast_start,
+                   MAX(r.forecast_date) AS forecast_end,
+                   SUM(r.predicted_demand) AS total_predicted_demand,
+                   SUM(r.predicted_demand) / NULLIF(COUNT(DISTINCT r.forecast_date), 0)
+                       AS average_daily_demand
+            FROM forecast_results r {base_where}
+            """,
+            base_params,
+        ).fetchone()
+        if not summary or not summary["prediction_rows"]:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Product {product_id} has no forecast in the selected run.",
+            )
+        rows = conn.execute(
+            f"""
+            SELECT r.id, r.run_id, p.id AS product_id, p.sku,
+                   p.name AS product_name, r.warehouse_id, w.warehouse_code,
+                   w.name AS warehouse_name, r.forecast_date,
+                   r.predicted_demand, r.model_name, r.model_version,
+                   r.generated_at
+            FROM forecast_results r
+            JOIN products p ON p.id=r.product_id
+            JOIN warehouses w ON w.id=r.warehouse_id
+            {base_where}
+            ORDER BY r.forecast_date, w.warehouse_code, r.model_name
+            LIMIT ? OFFSET ?
+            """,
+            base_params + [limit, offset],
+        ).fetchall()
+        return {
+            "run": dict(run),
+            "model_name": selected_model,
+            "product": {
+                "product_id": product_id,
+                "sku": rows[0]["sku"] if rows else None,
+                "product_name": rows[0]["product_name"] if rows else None,
+            },
+            "summary": dict(summary),
+            "data": [dict(row) for row in rows],
+            "meta": {
+                "total": summary["prediction_rows"],
+                "limit": limit,
+                "offset": offset,
+            },
+        }
+    finally:
+        conn.close()
+
+
+@compat_router.post("/run", status_code=201)
+@router.post("/run", status_code=201)
+def start_forecast(
+    request: ForecastRunRequest,
+    user: dict = Depends(require_permission("reports", "write")),
+):
+    """Start either forecasting model with one common M5/WMS request shape."""
+    if request.model == "rolling_average":
+        result = run_rolling_average(
+            RollingAverageForecastRequest(
+                source=request.source,
+                window_days=request.window_days,
+                series_limit=request.series_limit,
+                horizon_days=request.horizon_days,
+                as_of_date=request.as_of_date,
+            ),
+            user=user,
+        )
+    else:
+        result = run_arima_forecast(
+            ArimaForecastRequest(
+                source=request.source,
+                history_days=request.history_days,
+                fallback_window_days=request.fallback_window_days,
+                series_limit=request.series_limit,
+                max_arima_series=request.max_arima_series,
+                horizon_days=request.horizon_days,
+                as_of_date=request.as_of_date,
+            ),
+            user=user,
+        )
+    result["requested_model"] = request.model
+    return result
+
+
+@compat_router.get("/alerts")
+@router.get("/alerts")
+def list_forecast_alerts(
+    model_name: Optional[str] = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(require_permission("reports", "read")),
+):
+    """Return products at or below their usable-stock threshold."""
+    conn = get_db()
+    try:
+        usable_stock = (
+            "CASE WHEN p.batch_tracking_enabled_at IS NOT NULL "
+            "THEN COALESCE(batch_available.available_stock, 0) ELSE p.quantity END"
+        )
+        batch_stock_join = (
+            f"LEFT JOIN ({_operational_usable_batch_stock_sql()}) batch_available "
+            "ON batch_available.product_id=p.id"
+        )
+        where = (
+            "WHERE p.deleted=0 AND p.archived=0 AND p.is_forecast_test=0 "
+            f"AND ({usable_stock}) <= p.low_stock"
+        )
+        total = conn.execute(
+            f"SELECT COUNT(*) AS total FROM products p {batch_stock_join} {where}"
+        ).fetchone()["total"]
+        rows = conn.execute(
+            f"""
+            SELECT p.id AS product_id, p.sku, p.name AS product_name,
+                   {usable_stock} AS available_stock,
+                   p.quantity AS on_hand_stock,
+                   p.batch_tracking_enabled_at,
+                   p.low_stock AS alert_threshold,
+                   p.low_stock - ({usable_stock}) AS units_below_threshold,
+                   p.updated_at
+            FROM products p {batch_stock_join} {where}
+            ORDER BY (p.low_stock - ({usable_stock})) DESC, p.sku, p.id
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        latest_run = conn.execute(
+            "SELECT id, model_name, started_at, completed_at "
+            "FROM forecast_runs WHERE source='WMS' AND status='success' "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        forecast_alerts = None
+        forecast_warning = None
+        if latest_run is not None:
+            try:
+                projection = project_forecast_stockouts(
+                    int(latest_run["id"]),
+                    StockoutRiskRequest(model_name=model_name),
+                    limit=ALERT_PROJECTION_LIMIT,
+                    offset=0,
+                    user=user,
+                )
+                forecast_rows = projection["data"]
+                forecast_total = projection["meta"]["total"]
+                if len(forecast_rows) != forecast_total:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "The forecast run has more products than the alert projection "
+                            "limit. Request stockout predictions directly for the full report."
+                        ),
+                    )
+                at_risk = [
+                    row
+                    for row in forecast_rows
+                    if row["risk"] in {"critical", "high", "warning"}
+                    or row["reorder_required"]
+                ]
+                forecast_alerts = {
+                    "run_id": projection["run_id"],
+                    "model_name": projection["model_name"],
+                    "summary": projection["summary"],
+                    "data": [
+                        {
+                            "product_id": row["product_id"],
+                            "sku": row["sku"],
+                            "product_name": row["product_name"],
+                            "inventory_source": row["inventory_source"],
+                            "available_stock": row["available_stock"],
+                            "average_daily_demand": row["average_daily_demand"],
+                            "lead_time_days": row["lead_time_days"],
+                            "safety_stock": row["safety_stock"],
+                            "reorder_point": row["reorder_point"],
+                            "inventory_position": row["inventory_position"],
+                            "reorder_required": row["reorder_required"],
+                            "stockout_date": row["stockout_date"],
+                            "days_remaining": row["days_remaining"],
+                            "risk": row["risk"],
+                            "warehouse_count": len(row["warehouses"]),
+                        }
+                        for row in at_risk
+                    ],
+                    "meta": {"total": len(at_risk)},
+                }
+            except HTTPException as exc:
+                forecast_warning = exc.detail
+        return {
+            "source": "WMS",
+            "alert_basis": (
+                "current product stock compared with products.low_stock; "
+                "batch-tracked products use unexpired, available lot balances "
+                "from active operational warehouses"
+            ),
+            "latest_wms_forecast_run": dict(latest_run) if latest_run else None,
+            "forecast_alerts": forecast_alerts,
+            "forecast_warning": forecast_warning,
+            "summary": {"low_stock_products": total},
+            "data": [dict(row) for row in rows],
+            "meta": {"total": total, "limit": limit, "offset": offset},
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/compare")
 def compare_forecast_models(
     request: ForecastComparisonRequest,
@@ -1087,7 +1580,6 @@ def compare_forecast_models(
 ):
     """Persist four-model predictions and score them on the same holdout dates."""
     conn = get_db()
-    history_conn = None
     history_cursor = None
     m5_lock_acquired = False
     run_id = None
@@ -1227,8 +1719,9 @@ def compare_forecast_models(
             for row in series_rows
             for value in (int(row["product_id"]), int(row["warehouse_id"]))
         ]
-        history_conn = get_db()
-        history_cursor = history_conn.stream_cursor()
+        # Read the holdout from the same connection that selected the series,
+        # so concurrent backdated WMS writes cannot mix two data snapshots.
+        history_cursor = conn.stream_cursor()
         history_cursor.execute(
             f"""
             SELECT d.product_id, d.warehouse_id, d.demand_date, d.quantity_sold
@@ -1262,8 +1755,6 @@ def compare_forecast_models(
                 actual_sales[(demand_date - holdout_start).days] = quantity
         history_cursor.close()
         history_cursor = None
-        history_conn.close()
-        history_conn = None
         # The entire comparison snapshot is in memory, so model fitting should
         # not keep an M5 import from starting.
         conn.commit()
@@ -1517,7 +2008,7 @@ def compare_forecast_models(
         logger.exception("Forecast model comparison failed")
         raise
     finally:
-        for resource in (history_cursor, history_conn):
+        for resource in (history_cursor,):
             if resource is not None:
                 try:
                     resource.close()
@@ -2028,6 +2519,326 @@ def list_forecast_results(
             "run": dict(run),
             "data": [dict(row) for row in rows],
             "meta": {"total": total, "limit": limit, "offset": offset},
+        }
+    finally:
+        conn.close()
+
+
+@compat_router.post("/runs/{run_id}/stockout-predictions")
+@router.post("/runs/{run_id}/stockout-predictions")
+def project_forecast_stockouts(
+    run_id: int,
+    request: StockoutRiskRequest,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(require_permission("reports", "read")),
+):
+    """Project product-level stock risk from a saved run's daily predictions."""
+
+    conn = get_db()
+    try:
+        run = conn.execute(
+            "SELECT id, model_name, source, status, parameters FROM forecast_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Forecast run not found")
+        if run["status"] != "success":
+            raise HTTPException(
+                status_code=409,
+                detail="Stockout projections require a successfully completed forecast run.",
+            )
+
+        try:
+            parameters = run["parameters"] or {}
+            if isinstance(parameters, str):
+                parameters = json.loads(parameters)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Forecast run parameters could not be read.",
+            ) from exc
+
+        model_filter, model_params, selected_model = _forecast_result_model_filter(
+            conn, run, request.model_name
+        )
+
+        horizon_days = parameters.get("horizon_days")
+        if horizon_days is None and run["model_name"] == M5_EVALUATION_RUN_MODEL_NAME:
+            horizon_days = (parameters.get("evaluation_protocol") or {}).get("test_days")
+        try:
+            horizon_days = int(horizon_days)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="The forecast run does not contain a valid horizon.",
+            ) from exc
+        as_of_value = parameters.get("resolved_as_of_date") or parameters.get("as_of_date")
+        if not as_of_value and parameters.get("evaluation_protocol"):
+            as_of_value = parameters["evaluation_protocol"].get("training_end")
+
+        rows = conn.execute(
+            f"""
+            SELECT r.product_id, p.sku, p.name AS product_name,
+                   p.quantity AS available_stock, p.is_forecast_test,
+                   r.warehouse_id, w.warehouse_code, w.name AS warehouse_name,
+                   r.forecast_date, r.predicted_demand,
+                   s.lead_time_days, s.safety_stock
+            FROM forecast_results r
+            JOIN products p ON p.id=r.product_id
+            JOIN warehouses w ON w.id=r.warehouse_id
+            LEFT JOIN product_reorder_settings s
+              ON s.product_id=r.product_id AND s.warehouse_id=r.warehouse_id
+            WHERE r.run_id=? {model_filter}
+            ORDER BY r.product_id, r.warehouse_id, r.forecast_date
+            """,
+            [run_id] + model_params,
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=409, detail="This run has no matching predictions.")
+
+        products = {}
+        series_dates = {}
+        forecast_dates = set()
+        for row in rows:
+            product_id = int(row["product_id"])
+            warehouse_id = int(row["warehouse_id"])
+            product = products.setdefault(
+                product_id,
+                {
+                    "product_id": product_id,
+                    "sku": row["sku"],
+                    "product_name": row["product_name"],
+                    "available_stock": float(row["available_stock"]),
+                    "is_forecast_test": bool(row["is_forecast_test"]),
+                    "warehouses": {},
+                    "settings": {},
+                    "daily_demand": {},
+                },
+            )
+            product["warehouses"][warehouse_id] = {
+                "warehouse_id": warehouse_id,
+                "warehouse_code": row["warehouse_code"],
+                "warehouse_name": row["warehouse_name"],
+            }
+            if row["lead_time_days"] is not None:
+                product["settings"][warehouse_id] = {
+                    "lead_time_days": int(row["lead_time_days"]),
+                    "safety_stock": float(row["safety_stock"] or 0),
+                }
+            forecast_date = date.fromisoformat(row["forecast_date"])
+            forecast_dates.add(forecast_date)
+            series_key = (product_id, warehouse_id)
+            series_date_set = series_dates.setdefault(series_key, set())
+            if forecast_date in series_date_set:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Selected model contains duplicate daily predictions for a series.",
+                )
+            series_date_set.add(forecast_date)
+            product["daily_demand"][forecast_date] = (
+                product["daily_demand"].get(forecast_date, 0.0)
+                + float(row["predicted_demand"])
+            )
+
+        if len(forecast_dates) != horizon_days:
+            raise HTTPException(
+                status_code=409,
+                detail="Saved predictions do not cover the full forecast horizon.",
+            )
+        ordered_dates = sorted(forecast_dates)
+        if any(
+            current != previous + timedelta(days=1)
+            for previous, current in zip(ordered_dates, ordered_dates[1:])
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Saved forecast dates are not consecutive.",
+            )
+        if any(
+            len(dates) != horizon_days or set(ordered_dates) != dates
+            for dates in series_dates.values()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Saved predictions contain missing or duplicate daily coverage.",
+            )
+        if run["source"] == "WMS":
+            # Product quantities are current, product-wide balances. Use them
+            # from today forward and ignore already elapsed forecast dates.
+            as_of_date = datetime.now(timezone.utc).date()
+            ordered_dates = [forecast_date for forecast_date in ordered_dates if forecast_date > as_of_date]
+            if not ordered_dates:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This run has no future forecast dates relative to today. "
+                        "Generate a new WMS forecast before projecting stockouts."
+                    ),
+                )
+        elif as_of_value:
+            as_of_date = date.fromisoformat(as_of_value)
+        else:
+            as_of_date = ordered_dates[0] - timedelta(days=1)
+
+        if len(ordered_dates) <= request.warning_max_days:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"At least {request.warning_max_days + 1} future forecast days are "
+                    "required to classify healthy stock."
+                ),
+            )
+
+        replenishments_by_product = {}
+        receipt_details_by_product = {}
+        for receipt in request.replenishments:
+            product = products.get(receipt.product_id)
+            if product is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Incoming receipt references product {receipt.product_id}, "
+                        "which is not included in the selected forecast model."
+                    ),
+                )
+            if receipt.warehouse_id is not None and receipt.warehouse_id not in product["warehouses"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Incoming receipt for product {receipt.product_id} references "
+                        f"warehouse {receipt.warehouse_id}, which is not in this forecast."
+                    ),
+                )
+            if not as_of_date < receipt.arrival_date <= ordered_dates[-1]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Incoming receipt dates must fall after the forecast cutoff and "
+                        "within the saved forecast horizon."
+                    ),
+                )
+            replenishments_by_product.setdefault(receipt.product_id, []).append(
+                {"arrival_date": receipt.arrival_date, "quantity": receipt.quantity}
+            )
+            receipt_details_by_product.setdefault(receipt.product_id, []).append(
+                {
+                    "warehouse_id": receipt.warehouse_id,
+                    "arrival_date": receipt.arrival_date.isoformat(),
+                    "quantity": receipt.quantity,
+                    "reference": receipt.reference,
+                }
+            )
+
+        projections = []
+        for product in products.values():
+            if run["source"] == "M5":
+                if request.simulated_starting_stock is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "M5 has no on-hand inventory. Provide simulated_starting_stock "
+                            "to run a development stockout scenario."
+                        ),
+                    )
+                available_stock = request.simulated_starting_stock
+                inventory_source = "simulated"
+            else:
+                available_stock = product["available_stock"]
+                inventory_source = "products.quantity"
+
+            warehouse_settings = product["settings"]
+            missing_settings = len(product["warehouses"]) - len(warehouse_settings)
+            lead_times = [
+                setting["lead_time_days"] for setting in warehouse_settings.values()
+            ]
+            if missing_settings:
+                lead_times.append(request.default_lead_time_days)
+            lead_time_days = max(lead_times) if lead_times else request.default_lead_time_days
+            safety_stock = sum(
+                setting["safety_stock"] for setting in warehouse_settings.values()
+            )
+            if missing_settings:
+                safety_stock += missing_settings * request.default_safety_stock
+            projection = project_stockout(
+                [
+                    {"date": forecast_date, "predicted_demand": product["daily_demand"][forecast_date]}
+                    for forecast_date in ordered_dates
+                ],
+                available_stock=available_stock,
+                as_of_date=as_of_date,
+                lead_time_days=lead_time_days,
+                safety_stock=safety_stock,
+                replenishments=replenishments_by_product.get(product["product_id"], []),
+                critical_max_days=request.critical_max_days,
+                high_max_days=request.high_max_days,
+                warning_max_days=request.warning_max_days,
+            )
+            projections.append(
+                {
+                    "product_id": product["product_id"],
+                    "sku": product["sku"],
+                    "product_name": product["product_name"],
+                    "inventory_source": inventory_source,
+                    "warehouses": sorted(
+                        product["warehouses"].values(),
+                        key=lambda warehouse: warehouse["warehouse_code"],
+                    ),
+                    "incoming_receipts": receipt_details_by_product.get(
+                        product["product_id"], []
+                    ),
+                    "reorder_settings_coverage": {
+                        "configured_warehouses": len(warehouse_settings),
+                        "total_warehouses": len(product["warehouses"]),
+                    },
+                    **projection,
+                }
+            )
+
+        projections.sort(
+            key=lambda item: (
+                {"critical": 0, "high": 1, "warning": 2, "healthy": 3, "unrated": 4}[item["risk"]],
+                item["days_remaining"] if item["days_remaining"] is not None else horizon_days + 1,
+                item["sku"],
+            )
+        )
+        summary = {
+            "product_count": len(projections),
+            "critical": sum(item["risk"] == "critical" for item in projections),
+            "high": sum(item["risk"] == "high" for item in projections),
+            "warning": sum(item["risk"] == "warning" for item in projections),
+            "healthy": sum(item["risk"] == "healthy" for item in projections),
+            "unrated": sum(item["risk"] == "unrated" for item in projections),
+            "reorder_required": sum(item["reorder_required"] is True for item in projections),
+        }
+        return {
+            "run_id": run_id,
+            "source": run["source"],
+            "model_name": selected_model,
+            "as_of_date": as_of_date.isoformat(),
+            "forecast_start": ordered_dates[0].isoformat(),
+            "forecast_end": ordered_dates[-1].isoformat(),
+            "forecast_horizon_days": len(ordered_dates),
+            "uses_live_inventory": run["source"] == "WMS",
+            "has_purchase_order_source": False,
+            "assumptions": {
+                "wms_stock_basis": "products.quantity is shared across warehouses; demand is aggregated across this run's forecast warehouses.",
+                "incoming_receipts": "Projection-only dates and quantities supplied in this request; this app does not store open purchase orders.",
+                "series_sample_truncated": bool(
+                    parameters.get("series_sample_truncated")
+                    or parameters.get("arima_sample_truncated")
+                ),
+                "default_lead_time_days": request.default_lead_time_days,
+                "default_safety_stock": request.default_safety_stock,
+                "risk_thresholds": {
+                    "critical_max_days": request.critical_max_days,
+                    "high_max_days": request.high_max_days,
+                    "warning_max_days": request.warning_max_days,
+                },
+            },
+            "summary": summary,
+            "data": projections[offset : offset + limit],
+            "meta": {"total": len(projections), "limit": limit, "offset": offset},
         }
     finally:
         conn.close()

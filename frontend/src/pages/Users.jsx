@@ -1,25 +1,12 @@
 import { useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
+import Dialog from "../components/Dialog";
+import { useToast } from "../components/FeedbackProvider";
+import { formatDate } from "../format";
+import PageHeader from "../components/PageHeader";
 
 const ROLES = ["admin", "manager", "operator"];
-
-function Dialog({ open, onClose, title, children }) {
-  if (!open) return null;
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content" onClick={(e) => e.stopPropagation()}>
-        <div className="dialog-header">
-          <h2 className="dialog-title">{title}</h2>
-          <button onClick={onClose} className="btn btn-ghost btn-xs" style={{ padding: "4px 8px", fontSize: 18 }}>
-            &times;
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
 
 export default function Users() {
   const { user: me, can } = useAuth();
@@ -27,7 +14,7 @@ export default function Users() {
   const [form, setForm] = useState({ username: "", password: "", full_name: "", role: "operator" });
   const [editing, setEditing] = useState(null);
   const [newPassword, setNewPassword] = useState("");
-  const [dialog, setDialog] = useState(null);
+  const toast = useToast();
 
   const load = () => {
     authFetch("/admin/users").then(r => r.json()).then(d => setUsers(d.data)).catch(() => {});
@@ -35,7 +22,8 @@ export default function Users() {
 
   useEffect(() => { load(); }, []);
 
-  const showMsg = (body, variant = "success") => setDialog({ body, variant });
+  const showMsg = (body, variant = "success") =>
+    (variant === "error" ? toast.error(body) : toast.success(body));
 
   const addUser = async (e) => {
     e.preventDefault();
@@ -105,12 +93,7 @@ export default function Users() {
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Users</h1>
-          <p className="page-subtitle">Manage user accounts and roles</p>
-        </div>
-      </div>
+      <PageHeader eyebrow="Administration" title="Users" subtitle="Accounts and roles" />
 
       {canWrite && (
         <form onSubmit={addUser} className="card" style={{ marginBottom: 20 }}>
@@ -143,7 +126,7 @@ export default function Users() {
         </form>
       )}
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Users">
         <table>
           <thead>
             <tr>
@@ -171,8 +154,8 @@ export default function Users() {
                 <td>
                   {u.active ? <span className="badge badge-success">Active</span> : <span className="badge badge-warning">Inactive</span>}
                 </td>
-                <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", whiteSpace: "nowrap" }}>
-                  {u.created_at ? new Date(u.created_at + "Z").toLocaleDateString() : "-"}
+                <td className="mono" style={{ color: "var(--text-secondary)", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
+                  {formatDate(u.created_at)}
                 </td>
                 <td style={{ textAlign: "right" }}>
                   {canWrite && (
@@ -221,13 +204,6 @@ export default function Users() {
             </div>
           </div>
         )}
-      </Dialog>
-
-      <Dialog open={!!dialog} onClose={() => setDialog(null)} title={dialog?.variant === "error" ? "Error" : "Success"}>
-        <p style={{ color: "var(--text-secondary)" }}>{dialog?.body}</p>
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
-          <button className="btn btn-primary btn-sm" onClick={() => setDialog(null)}>OK</button>
-        </div>
       </Dialog>
     </section>
   );

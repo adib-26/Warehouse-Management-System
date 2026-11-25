@@ -19,6 +19,7 @@ NovaLedger is designed for organizations that require secure and efficient inven
 * Stock movement tracking with paginated history and filtering
 * Inbound shipment management
 * Outbound shipment management
+* Batch-level inventory with transactional FIFO/FEFO allocation, expiry handling, and product/batch reconciliation
 * Supplier management
 * Customer management
 * File attachment support for shipment documents
@@ -65,6 +66,7 @@ PythonProject/
 │       ├── inbound.py
 │       ├── outbound.py
 │       ├── warehouses.py
+│       ├── batches.py
 │       ├── forecasting.py
 │       └── attachments.py
 │
@@ -202,9 +204,12 @@ ports remain 8000 and 80 respectively. Deliberately change a bind address only
 when a network design requires it.
 
 The API reads `APP_ENV`, `SECRET_KEY`, `INITIAL_ADMIN_USERNAME`,
-`INITIAL_ADMIN_PASSWORD`, `CORS_ORIGINS`, `DATABASE_URL`, `MYSQL_PASSWORD`,
-`MYSQL_ROOT_PASSWORD`, `UPLOAD_DIR`, and `MAX_UPLOAD_BYTES` from the environment.
-`MYSQL_PASSWORD` is the password inside `DATABASE_URL`. Production startup rejects the built-in
+`INITIAL_ADMIN_PASSWORD`, `CORS_ORIGINS`, `DATABASE_URL`,
+`DATABASE_PASSWORD`, `UPLOAD_DIR`, and `MAX_UPLOAD_BYTES` from the environment.
+Docker Compose maps `MYSQL_PASSWORD` to `DATABASE_PASSWORD`, which means a
+generated database password may contain URL-reserved characters without being
+percent-encoded. Existing deployments that place the password in
+`DATABASE_URL` continue to work. Production startup rejects the built-in
 development signing key and weak first-run administrator passwords. Existing
 databases keep their current users; use the administration screen to change an
 existing account password. Changing `SECRET_KEY` invalidates all active JWTs.
@@ -218,13 +223,13 @@ startup. Keep the `mysql-data` volume when updating the application image.
 Before a production upgrade, dump the database:
 
 ```bash
-docker compose exec -T mysql mysqldump -unovaledger -p"$MYSQL_PASSWORD" novaledger > novaledger-pre-upgrade.sql
+docker compose exec -T mysql sh -c 'exec mysqldump -unovaledger -p"$MYSQL_PASSWORD" novaledger' > novaledger-pre-upgrade.sql
 ```
 
 Future schema changes belong in numbered migration functions in
 `backend/database.py`. Increment `SCHEMA_VERSION`, register the function in
 `SCHEMA_MIGRATIONS`, and do not edit a migration that existing installations
-have already applied.
+have already applied. The current application schema version is 10.
 
 ### Production deployment notes
 
@@ -233,7 +238,7 @@ place a TLS-terminating reverse proxy (such as Caddy, Traefik, or a managed
 load balancer) in front of the frontend. Serve HTTPS before exposing the app;
 do not publish the backend directly. Enable HSTS only at that HTTPS boundary.
 
-The application database is MySQL Community Edition. Point every backend instance at the same `DATABASE_URL` before running more than one API process. Do not share one MySQL data volume across hosts.
+The application database is MySQL Community Edition. Point every backend instance at the same `DATABASE_URL` and `DATABASE_PASSWORD` before running more than one API process. Do not share one MySQL data volume across hosts.
 
 ---
 
@@ -274,6 +279,27 @@ Windows:
 set SECRET_KEY=replace-with-a-long-random-secret
 set CORS_ORIGINS=http://localhost:5173
 ```
+
+### Isolated API integration tests
+
+Run the API suite against a disposable MySQL container instead of the normal
+application database:
+
+```bash
+PYTHON=./.venv/bin/python ./scripts/test_api_integration.sh
+```
+
+The runner creates a Docker Compose project named `novaledger-api-test` on
+`127.0.0.1:3307`, runs `backend/tests/test_api.py` with `APP_ENV=test`, then
+removes only that project's database volume. It never connects to or removes
+the normal `mysql-data` volume. `TEST_DATABASE_URL`, when set, is constrained
+to the `novaledger` user at `127.0.0.1`, `TEST_MYSQL_PORT`, and the
+`novaledger_test` database; unsafe overrides are rejected before Docker starts.
+The default URL safely percent-encodes
+`TEST_MYSQL_PASSWORD`. Override `TEST_MYSQL_PORT`, `TEST_MYSQL_PASSWORD`, and
+`TEST_MYSQL_ROOT_PASSWORD` as needed. For parallel CI jobs, also set a distinct
+test-only `TEST_COMPOSE_PROJECT` such as `novaledger-api-test-ci1` and a distinct
+`TEST_MYSQL_PORT`; non-test project names are rejected.
 
 ### Frontend
 
@@ -369,33 +395,40 @@ python3 scripts/prepare_m5.py \
   --output datasets/m5/processed/m5_validation_daily_sales.csv.gz
 ```
 
-Run the converter and validator regression checks with:
+Run the converter, loader, and validator regression checks with:
 
 ```bash
-python3 -m unittest discover -s scripts/tests -v
+python3 -m pytest -q scripts/tests
 ```
 
 ### Forecasting database
 
-The version 5 migration adds `forecast_demand_history`, `forecast_results`,
+Migration 3 adds `forecast_demand_history`, `forecast_results`,
 `forecast_runs`, `product_reorder_settings`, `forecast_m5_mappings`, and
 `forecast_m5_imports`. It reuses NovaLedger’s existing `products` table and
 adds one shared `warehouses` master. Forecast tables use InnoDB, foreign keys,
-nonnegative quantity checks, and product/warehouse/date uniqueness.
-Version 6 adds request parameters to forecast runs so their source, cutoff,
-history window, and horizon remain visible for later review. Version 7 lets one
-comparison run save predictions from multiple models for the same product,
-warehouse, and test date. Version 8 adds immutable per-series metric reports
-for fixed M5 benchmark evaluations.
+nonnegative quantity checks, and product/warehouse/date uniqueness. Migration
+5 isolates legacy M5 records from operational inventory, migration 6 records
+forecast request parameters, migration 7 lets comparison runs save predictions
+from several models for the same product, warehouse, and date, and migration 8
+adds immutable per-series metric reports for fixed M5 benchmark evaluations.
+Migration 9 adds decimal-safe batch balances and outbound allocations, and
+migration 10 marks the batch-tracking cutover so historic shipments cannot be
+allocated against newly tracked lot balances.
 
-New outbound dispatches must select a real warehouse in the web app. The
-shipment, stock decrement, stock movement, and daily `WMS` demand are written
-in one transaction. CSV/XLSX outbound imports can include `warehouse_code`;
-without it the shipment remains valid but does not contribute warehouse-level
-forecast demand. Existing outbound records stay unchanged with a null
-warehouse because their original location cannot be inferred. The current
-inventory count remains product-level; warehouse assignment supplies demand
-attribution rather than separate warehouse stock balances.
+New outbound dispatches must select a real active warehouse. The shipment,
+stock decrement, stock movement, and daily `WMS` demand are written in one
+transaction. CSV/XLSX outbound imports require `warehouse_code`; blank,
+inactive, test, or unknown codes are reported as row errors, and future
+`dispatch_date` values are rejected. Existing outbound records stay unchanged
+with a null warehouse because their original location cannot be inferred. The
+current inventory count remains product-level; warehouse assignment supplies
+demand attribution rather than separate warehouse stock balances.
+
+Each accepted outbound-import row is an independent dispatch. Until the input
+contract includes a stable external dispatch-line ID, do not retry a partially
+successful file wholesale: `so_ref` is not a safe idempotency key, so re-send
+only the corrected or unprocessed rows reported by the response.
 
 Administrators can create or deactivate real warehouses from the
 Administration → Warehouses page or through `/v1/warehouses`. M5 test warehouses do not appear
@@ -516,6 +549,100 @@ the saved model name identifies those fallback rows. The default deterministic
 sample is 100 series and the maximum is 250, so a report always states when it
 is a bounded sample rather than the full M5 catalog.
 
+### Stockout risk projections
+
+`POST /v1/forecasts/runs/{run_id}/stockout-predictions` converts a successful
+run's daily predictions into product-level remaining-stock paths, first
+stockout dates, risk bands, and reorder recommendations. WMS projections use
+the current `products.quantity` balance and saved `product_reorder_settings`
+where available; request-level fallback lead time and safety stock can be
+changed for each projection. The default risk cutoffs are critical through 3
+days, high through 7, warning through 14, and healthy beyond 14. They are
+configurable in the request and in the Forecasts screen.
+
+This application currently stores inventory quantity at product level, not by
+warehouse. The projection therefore sums the selected run's daily demand across
+its warehouses and compares it with that product-wide balance. It uses only
+future forecast dates relative to today for WMS stock. Bounded forecast samples
+are flagged because excluded warehouses can understate demand.
+
+M5 contains demand but no on-hand balances, so an M5 projection requires an
+explicit `simulated_starting_stock` and is labeled as a development scenario.
+Incoming receipts can be included in the request with product, optional
+warehouse, arrival date, quantity, and purchase-order reference. They are
+applied before demand on their arrival date. NovaLedger does not yet store open
+purchase orders, so receipt entries affect only that projection and do not
+create or update an order. The response includes daily opening stock, demand,
+receipts, unmet demand, and ending stock for each product.
+
+### Forecast API
+
+The forecasting service is available through the versioned `/v1/forecasts`
+routes and the compatibility routes below. `POST /api/forecast/run` uses one
+request shape for both sources, for example
+`{"source":"WMS","model":"rolling_average","horizon_days":28}`; set
+`source` to `M5` for development experiments. `model` accepts
+`rolling_average` or `arima`. Product forecast listings require `model_name`
+when the selected run contains multiple model outputs. Alerts keep current
+low-stock results available and return a forecast warning if a multi-model
+WMS run needs an explicit `model_name`.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/forecast/overview?source=WMS` | Run counts and latest forecast coverage |
+| GET | `/api/forecast/products?source=WMS` | Product level demand totals for the latest successful run, or a selected `run_id` (defaults to WMS) |
+| GET | `/api/forecast/products/{id}?source=WMS` | Daily forecast rows and summary for one product (defaults to WMS) |
+| POST | `/api/forecast/run` | Start an M5 or WMS forecast with a shared request shape |
+| GET | `/api/forecast/runs?source=WMS` | Forecast execution history |
+| GET | `/api/forecast/alerts` | Current WMS low-stock products, plus forecast risk alerts when a usable WMS run exists |
+| PUT | `/api/products/{id}/reorder-settings` | Save lead time, safety stock, and review period for a product at one warehouse |
+
+The product reorder settings body requires a `warehouse_id`; reorder policy is
+stored per product and warehouse. Forecast alerts use the live product
+`quantity` and `low_stock` values. When a successful WMS run contains enough
+future dates, the same response also includes products in critical, high, or
+warning risk bands and products below their reorder point. The existing
+`/api/forecast/runs/{run_id}/stockout-predictions` endpoint returns the full
+daily stock path and accepts optional dated receipts.
+
+Example reorder-settings body:
+
+```json
+{
+  "warehouse_id": 12,
+  "lead_time_days": 5,
+  "safety_stock": 30,
+  "review_period_days": 7
+}
+```
+
+For example, for an M5 development run:
+
+```json
+{
+  "simulated_starting_stock": 120,
+  "default_lead_time_days": 5,
+  "default_safety_stock": 30,
+  "critical_max_days": 3,
+  "high_max_days": 7,
+  "warning_max_days": 14,
+  "replenishments": [
+    {
+      "product_id": 101,
+      "warehouse_id": 12,
+      "arrival_date": "2016-05-10",
+      "quantity": 50,
+      "reference": "PO-1042"
+    }
+  ]
+}
+```
+
+The reorder point uses the forecast's cumulative lead-time demand plus safety
+stock. Incoming quantities due by the end of lead time are included in the
+inventory position. A stockout date is the first forecast date when available
+stock cannot meet that day's predicted demand.
+
 Forecasting and comparisons acquire the same M5 import lock as the loader. If
 an M5 import is active, the API returns `409` instead of calculating from a
 partially committed dataset.
@@ -528,8 +655,8 @@ python3 scripts/create_m5_mapping_template.py
 
 Fill `product_id` and `warehouse_id` using active records marked
 `is_forecast_test=1`. Each M5 item/store series must map to its own
-product/warehouse pair. After the version 5 migration has run at backend
-startup, import the processed CSV with:
+product/warehouse pair. After backend startup has applied the forecasting
+schema migrations, import the processed CSV with:
 
 ```bash
 python3 scripts/load_m5_forecast.py \
@@ -538,12 +665,31 @@ python3 scripts/load_m5_forecast.py \
 ```
 
 The loader verifies the converter manifest by default, validates every source
-series, preserves zero demand, validates mappings, serializes imports with a
-MySQL lock, and records each attempt in `forecast_m5_imports`. Rerunning the
-same successful input and mapping is idempotent. To load a different source or
-mapping for a selected series, use `--replace`; it upserts the complete
-replacement first, then prunes only stale dates for those affected M5 series.
-An interrupted import therefore does not clear the previous series up front.
+series (including skipped ones), preserves zero demand, validates mappings,
+serializes imports with a MySQL lock, and records each activated attempt in
+`forecast_m5_imports`. It hashes the artifact during that validation pass and
+stages only selected rows in a connection-private InnoDB table, so a sparse
+selection does not require a second scan of the full M5 file. Rerunning the
+same successful input and mapping is idempotent.
+
+For `--replace`, the staged rows are upserted, verified, and—only then—stale
+dates for the selected series are pruned in one transaction together with the
+success audit update. An interruption or verification failure leaves the prior
+selected demand history intact; the private staging table disappears with the
+connection. `--batch-size` controls staging commits only (default: 5,000 rows),
+not the atomic publish step.
+
+The host-side bootstrap and loader scripts read the repository `.env` file when
+it exists, matching the Docker Compose credentials. Explicit shell environment
+variables take precedence. The dependency-free loader supports ordinary
+`KEY=value` entries, optional `export`, single or double quoted values, and
+comments. Double quotes support common backslash escapes (`\\`, `\"`, `\n`,
+`\r`, and `\t`); use the shell environment for Compose interpolation or
+multi-line values. Keep `DATABASE_URL` pointed at `127.0.0.1` for host-side
+scripts; Compose supplies its internal `mysql` hostname to the backend
+container. Set `DATABASE_PASSWORD` to the same value as `MYSQL_PASSWORD` when
+using the included `.env` template. It is passed directly to the database
+driver, so it safely supports URL-reserved characters without encoding.
 
 A GitHub clone includes that same multiwarehouse sample, without the unused
 full sales and price files. The committed files are:
@@ -579,6 +725,11 @@ all 30,490 series (59,181,090 rows):
 python3 scripts/bootstrap_m5_test_catalog.py --output datasets/m5/processed/m5_mapping.csv --force
 python3 scripts/load_m5_forecast.py --input datasets/m5/processed/m5_daily_sales.csv.gz --mapping datasets/m5/processed/m5_mapping.csv --replace
 ```
+
+The full import stages every selected row in a private MySQL table before its
+atomic publish. Make room for the existing forecast history, a temporary staged
+copy, and indexes; test the included sample first on the target database and
+monitor available disk throughout the import.
 
 The bootstrap uses the existing product and warehouse tables, creates only
 zero-stock records marked `is_forecast_test=1`, and writes a populated mapping
@@ -677,6 +828,47 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | POST   | `/v1/warehouses` | Create a real warehouse (administrator) |
 | PATCH  | `/v1/warehouses/{warehouse_id}` | Update or activate/deactivate a real warehouse (administrator) |
 
+### Batch inventory — `/api`
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| POST | `/api/batches` | Receive a real lot, or enable tracking with an opening balance matching existing product stock |
+| GET | `/api/batches` | Filter and page through lots, including expiry and reconciliation fields |
+| GET | `/api/batches/{id}` | Read one lot |
+| PUT | `/api/batches/{id}` | Correct lot details, status, or remaining balance |
+| GET | `/api/products/{id}/batches` | List a product's lots and its stock reconciliation summary |
+| GET | `/api/batches/reconciliation` | Report products whose total batch balance differs from product on-hand |
+| POST | `/api/products/{id}/batches/reconcile` | Set product on-hand to the sum of remaining lot balances and record the adjustment |
+| POST | `/api/outbound/{id}/allocate` | Allocate an outbound shipment using `AUTO`, `FIFO`, or `FEFO` |
+| GET | `/api/outbound/{id}/allocations` | Read the lot allocations for one outbound shipment |
+
+`AUTO` uses FEFO when eligible lots have expiry dates and FIFO otherwise. The
+InnoDB transaction locks the product and eligible lot rows; product on-hand,
+remaining lot balances, allocation rows, and stock movements commit together.
+Expired, blocked, and depleted lots are never allocated. If eligible stock
+cannot cover the full order, the transaction rolls back without a partial
+dispatch.
+
+`inventory_batches.remaining_quantity` is the source of truth for tracked
+products. Product edits, manual stock movements, and ordinary inbound receipts
+cannot change a tracked product's quantity; receive an actual supplier lot
+through `POST /api/batches`. When converting a product with existing stock, set
+`opening_balance: true` and make both `received_quantity` and
+`remaining_quantity` equal its current on-hand balance. Later receipts add the
+new remaining quantity to product on-hand. Use the reconciliation report to
+find older mismatches, then apply the explicit reconciliation endpoint before
+allocating stock.
+
+M5 contains no lot or expiry facts, so it is never used to infer operational
+batches. For development only, the sample script can create clearly marked
+synthetic lots on forecast-test products and warehouses. It previews by default
+and writes only with `--apply`:
+
+```bash
+python3 scripts/seed_m5_sample_batches.py --count 10
+python3 scripts/seed_m5_sample_batches.py --count 10 --apply
+```
+
 ### Forecasting — `/v1/forecasts`
 
 | Method | Endpoint | Description |
@@ -685,6 +877,7 @@ Unless noted otherwise, every endpoint requires a valid JWT bearer token in the 
 | POST   | `/v1/forecasts/arima` | Generate ARIMA(1,1,1) predictions with rolling-average fallback |
 | POST   | `/v1/forecasts/compare` | Save and score four model predictions on one historical holdout sample |
 | POST   | `/v1/forecasts/m5-evaluations` | Run a fixed 28-day M5 development or final backtest and save its report |
+| POST   | `/v1/forecasts/runs/{run_id}/stockout-predictions` | Project stockout dates, risk bands, daily balances, and reorder recommendations from a saved run |
 | GET    | `/v1/forecasts/runs` | List forecasting runs |
 | GET    | `/v1/forecasts/runs/{run_id}/results` | List predictions for a run, optionally filtered by product or warehouse |
 | GET    | `/v1/forecasts/runs/{run_id}/evaluation` | List per-product, warehouse, and model metrics for a fixed M5 evaluation |

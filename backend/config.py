@@ -7,6 +7,10 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "mysql://novaledger:novaledger@127.0.0.1:3306/novaledger",
 ).strip()
+# An orchestrator can provide the password separately so generated secrets do
+# not have to be encoded as URL syntax. DATABASE_URL remains backwards
+# compatible for local and existing deployments.
+DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", BASE_DIR / "uploads")).expanduser()
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 SECRET_KEY = os.getenv("SECRET_KEY", "novaledger-dev-secret-change-me").strip()

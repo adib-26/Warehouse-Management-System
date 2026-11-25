@@ -108,6 +108,14 @@ def validate_and_enrich_day_columns(
     if not day_columns:
         raise ValueError("Sales CSV contains no daily columns named d_1, d_2, ...")
 
+    # Report a missing calendar mapping before a secondary sequencing error.
+    # For example, an unexpected d_1942 column is most usefully diagnosed as
+    # absent from the supplied calendar, even if it is the only day column.
+    missing_days = [day for day, _ in day_columns if day not in day_to_date]
+    if missing_days:
+        preview = ", ".join(missing_days[:5])
+        raise ValueError(f"Calendar is missing sales day identifiers: {preview}")
+
     day_numbers = [int(DAY_COLUMN.fullmatch(day).group(1)) for day, _ in day_columns]
     if day_numbers[0] != 1:
         raise ValueError("M5 sales day identifiers must start at d_1")
@@ -116,11 +124,6 @@ def validate_and_enrich_day_columns(
             raise ValueError(
                 f"Sales day columns are not consecutive: d_{previous}, d_{current}"
             )
-
-    missing_days = [day for day, _ in day_columns if day not in day_to_date]
-    if missing_days:
-        preview = ", ".join(missing_days[:5])
-        raise ValueError(f"Calendar is missing sales day identifiers: {preview}")
 
     enriched_columns = [
         (day, day_to_date[day], index) for day, index in day_columns

@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
-from database import get_db, MODULES, ROLES
+from database import IntegrityError, get_db, MODULES, ROLES
 from security import hash_password, log_audit, require_permission
 
 router = APIRouter()
@@ -64,29 +64,47 @@ def list_users(user: dict = Depends(require_permission("admin", "read"))):
 def create_user(u: UserCreate, response: Response, user: dict = Depends(require_permission("admin", "write"))):
     if u.role not in ROLES:
         raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(ROLES)}")
-    if not u.username.strip() or len(u.password) < 12:
+    username = u.username.strip()
+    if not username or len(u.password) < 12:
         raise HTTPException(status_code=400, detail="Username required and password must be at least 12 characters")
 
     conn = get_db()
-    cur = conn.cursor()
-    existing = cur.execute("SELECT id FROM users WHERE username=?", (u.username.strip(),)).fetchone()
-    if existing:
+    try:
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT id FROM users WHERE username=?", (username,)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already exists")
+
+        try:
+            cur.execute(
+                "INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)",
+                (username, hash_password(u.password), u.full_name, u.role),
+            )
+        except IntegrityError as exc:
+            # The preflight check provides a clear response in the normal case;
+            # this branch handles two requests that race for the same username.
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="Username already exists") from exc
+        user_id = cur.lastrowid
+        log_audit(
+            cur,
+            user,
+            "CREATE",
+            "admin",
+            "user",
+            user_id,
+            f"Created user '{username}' with role {u.role}",
+        )
+        conn.commit()
+
+        row = cur.execute(
+            "SELECT id, username, full_name, role, active, created_at, updated_at FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+    finally:
         conn.close()
-        raise HTTPException(status_code=409, detail="Username already exists")
-
-    cur.execute(
-        "INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)",
-        (u.username.strip(), hash_password(u.password), u.full_name, u.role),
-    )
-    user_id = cur.lastrowid
-    log_audit(cur, user, "CREATE", "admin", "user", user_id, f"Created user '{u.username}' with role {u.role}")
-    conn.commit()
-
-    row = cur.execute(
-        "SELECT id, username, full_name, role, active, created_at, updated_at FROM users WHERE id=?",
-        (user_id,),
-    ).fetchone()
-    conn.close()
 
     response.headers["Location"] = f"/v1/admin/users/{user_id}"
     return dict(row)

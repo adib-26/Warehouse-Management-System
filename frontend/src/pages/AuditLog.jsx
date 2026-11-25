@@ -1,19 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
-
-const ACTION_STYLES = {
-  CREATE: { bg: "var(--green-bg)", color: "var(--green)" },
-  UPDATE: { bg: "var(--blue-bg)", color: "var(--blue)" },
-  DELETE: { bg: "var(--red-bg)", color: "var(--red)" },
-  ARCHIVE: { bg: "var(--yellow-bg)", color: "var(--yellow)" },
-  STOCK_IN: { bg: "var(--green-bg)", color: "var(--green)" },
-  STOCK_OUT: { bg: "var(--red-bg)", color: "var(--red)" },
-  LOGIN: { bg: "var(--blue-bg)", color: "var(--blue)" },
-  BULK_IMPORT: { bg: "var(--yellow-bg)", color: "var(--yellow)" },
-  UPLOAD: { bg: "var(--blue-bg)", color: "var(--blue)" },
-  UNDO: { bg: "var(--yellow-bg)", color: "var(--yellow)" },
-};
+import { actionMeta, formatDateTime } from "../format";
+import PageHeader from "../components/PageHeader";
 
 export default function AuditLog() {
   const { can } = useAuth();
@@ -41,12 +30,7 @@ export default function AuditLog() {
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Audit Log</h1>
-          <p className="page-subtitle">Who did what, when, and on what record</p>
-        </div>
-      </div>
+      <PageHeader eyebrow="Reports" title="Audit Log" subtitle="Who changed what, and when" />
 
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-body" style={{ paddingBottom: 12 }}>
@@ -77,7 +61,7 @@ export default function AuditLog() {
         </div>
       </div>
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Audit log">
         {logs.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-text">No audit records found</div>
@@ -96,21 +80,21 @@ export default function AuditLog() {
             </thead>
             <tbody>
               {logs.map(l => {
-                const style = ACTION_STYLES[l.action] || { bg: "var(--bg-surface-elevated)", color: "var(--text-secondary)" };
+                const meta = actionMeta(l.action);
                 return (
                   <tr key={l.id}>
-                    <td style={{ fontSize: "0.8125rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
-                      {l.created_at ? new Date(l.created_at + "Z").toLocaleString() : "-"}
+                    <td className="mono" style={{ fontSize: "0.78rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      {formatDateTime(l.created_at)}
                     </td>
-                    <td style={{ fontWeight: 600 }}>{l.username || "-"}</td>
+                    <td style={{ fontWeight: 600 }}>{l.username || "—"}</td>
                     <td>
-                      <span className="badge" style={{ background: style.bg, color: style.color }}>{l.action}</span>
+                      <span className={`badge ${meta.cls}`}>{l.action}</span>
                     </td>
-                    <td style={{ color: "var(--text-secondary)", textTransform: "capitalize" }}>{l.module || "-"}</td>
-                    <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", whiteSpace: "nowrap" }}>
-                      {l.entity_type ? `${l.entity_type}${l.entity_id ? ` #${l.entity_id}` : ""}` : "-"}
+                    <td style={{ color: "var(--text-secondary)", textTransform: "capitalize" }}>{l.module || "—"}</td>
+                    <td className="mono" style={{ color: "var(--text-secondary)", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
+                      {l.entity_type ? `${l.entity_type}${l.entity_id ? ` #${l.entity_id}` : ""}` : "—"}
                     </td>
-                    <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>{l.details || "-"}</td>
+                    <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>{l.details || "—"}</td>
                   </tr>
                 );
               })}

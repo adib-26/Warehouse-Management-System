@@ -1,7 +1,7 @@
 """High-value API contract tests using an isolated MySQL database."""
 
 import csv
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import importlib
 import io
 import json
@@ -50,12 +50,22 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("INITIAL_ADMIN_USERNAME", "admin")
     monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", "admin123")
 
+    original_modules = {
+        module_name: sys.modules[module_name]
+        for module_name in APP_MODULES
+        if module_name in sys.modules
+    }
     for module_name in APP_MODULES:
         sys.modules.pop(module_name, None)
 
-    app = importlib.import_module("main").app
-    with TestClient(app) as test_client:
-        yield test_client
+    try:
+        app = importlib.import_module("main").app
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        for module_name in APP_MODULES:
+            sys.modules.pop(module_name, None)
+        sys.modules.update(original_modules)
 
 
 def auth_headers(client):
@@ -187,6 +197,7 @@ def test_catalog_filters_facets_pagination_and_csv_export(client):
 def test_inbound_and_outbound_keep_stock_and_movements_consistent(client):
     headers = auth_headers(client)
     product = create_product(client, headers, quantity=5, sku="FLOW-001")
+    warehouse = create_warehouse(client, headers, warehouse_code="FLOW-001")
 
     supplier = client.post("/v1/suppliers", headers=headers, json={"name": "North Supply"})
     assert supplier.status_code == 201, supplier.text
@@ -203,7 +214,12 @@ def test_inbound_and_outbound_keep_stock_and_movements_consistent(client):
     outbound = client.post(
         "/v1/outbound-shipments",
         headers=headers,
-        json={"product_id": product["id"], "customer_id": customer.json()["id"], "quantity": 6},
+        json={
+            "product_id": product["id"],
+            "customer_id": customer.json()["id"],
+            "warehouse_id": warehouse["id"],
+            "quantity": 6,
+        },
     )
     assert outbound.status_code == 201, outbound.text
     assert outbound.json()["quantity_after"] == 2
@@ -211,7 +227,12 @@ def test_inbound_and_outbound_keep_stock_and_movements_consistent(client):
     oversell = client.post(
         "/v1/outbound-shipments",
         headers=headers,
-        json={"product_id": product["id"], "customer_id": customer.json()["id"], "quantity": 3},
+        json={
+            "product_id": product["id"],
+            "customer_id": customer.json()["id"],
+            "warehouse_id": warehouse["id"],
+            "quantity": 3,
+        },
     )
     assert oversell.status_code in {400, 409}
 
@@ -224,6 +245,141 @@ def test_inbound_and_outbound_keep_stock_and_movements_consistent(client):
     )
     assert movements.status_code == 200
     assert [movement["delta"] for movement in movements.json()["data"]] == [-6, 3, 5]
+
+    database = importlib.import_module("database")
+    conn = database.get_db()
+    try:
+        demand = conn.execute(
+            """
+            SELECT quantity_sold FROM forecast_demand_history
+            WHERE product_id=? AND warehouse_id=? AND source='WMS'
+            """,
+            (product["id"], warehouse["id"]),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert demand["quantity_sold"] == 6
+
+
+def test_outbound_requires_an_operational_warehouse_for_forecastable_demand(client):
+    headers = auth_headers(client)
+    product = create_product(client, headers, sku="WAREHOUSE-REQUIRED", quantity=5)
+    warehouse = create_warehouse(
+        client, headers, warehouse_code="WAREHOUSE-REQUIRED"
+    )
+    customer = client.post("/v1/customers", headers=headers, json={"name": "Warehouse buyer"})
+    assert customer.status_code == 201, customer.text
+
+    response = client.post(
+        "/v1/outbound-shipments",
+        headers=headers,
+        json={
+            "product_id": product["id"],
+            "customer_id": customer.json()["id"],
+            "quantity": 1,
+        },
+    )
+
+    assert response.status_code == 422
+    assert any(
+        item["loc"][-1] == "warehouse_id"
+        for item in response.json()["detail"]
+    )
+
+    future_date = client.post(
+        "/v1/outbound-shipments",
+        headers=headers,
+        json={
+            "product_id": product["id"],
+            "customer_id": customer.json()["id"],
+            "warehouse_id": warehouse["id"],
+            "quantity": 1,
+            "dispatch_date": date.max.isoformat(),
+        },
+    )
+    assert future_date.status_code == 422
+    assert future_date.json()["detail"] == "dispatch_date cannot be in the future"
+
+
+def test_outbound_bulk_import_requires_warehouse_and_records_wms_demand(client):
+    headers = auth_headers(client)
+    product = create_product(client, headers, sku="BULK-WAREHOUSE-001", quantity=5)
+    warehouse = create_warehouse(
+        client,
+        headers,
+        warehouse_code="BULK-WAREHOUSE-001",
+    )
+    customer = client.post(
+        "/v1/customers", headers=headers, json={"name": "Bulk warehouse buyer"}
+    )
+    assert customer.status_code == 201, customer.text
+
+    missing_warehouse = client.post(
+        "/v1/outbound-shipments/imports",
+        headers=headers,
+        files={
+            "file": (
+                "outbound.csv",
+                "sku,customer_name,quantity\n"
+                "BULK-WAREHOUSE-001,Bulk warehouse buyer,2\n",
+                "text/csv",
+            )
+        },
+    )
+    assert missing_warehouse.status_code == 200, missing_warehouse.text
+    assert missing_warehouse.json()["imported"] == 0
+    assert missing_warehouse.json()["total_errors"] == 1
+    assert "warehouse_code is required" in missing_warehouse.json()["errors"][0]
+
+    future_dispatch = client.post(
+        "/v1/outbound-shipments/imports",
+        headers=headers,
+        files={
+            "file": (
+                "outbound.csv",
+                "sku,customer_name,warehouse_code,quantity,dispatch_date\n"
+                "BULK-WAREHOUSE-001,Bulk warehouse buyer,BULK-WAREHOUSE-001,2,9999-12-31\n",
+                "text/csv",
+            )
+        },
+    )
+    assert future_dispatch.status_code == 200, future_dispatch.text
+    assert future_dispatch.json()["imported"] == 0
+    assert future_dispatch.json()["total_errors"] == 1
+    assert "dispatch_date cannot be in the future" in future_dispatch.json()["errors"][0]
+
+    dispatch_day = datetime.now(timezone.utc).date().isoformat()
+
+    imported = client.post(
+        "/v1/outbound-shipments/imports",
+        headers=headers,
+        files={
+            "file": (
+                "outbound.csv",
+                "sku,customer_name,warehouse_code,quantity,dispatch_date\n"
+                f"BULK-WAREHOUSE-001,Bulk warehouse buyer,BULK-WAREHOUSE-001,2,{dispatch_day}\n",
+                "text/csv",
+            )
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["imported"] == 1
+    assert imported.json()["total_errors"] == 0
+
+    database = importlib.import_module("database")
+    conn = database.get_db()
+    try:
+        demand = conn.execute(
+            """
+            SELECT quantity_sold FROM forecast_demand_history
+            WHERE product_id=? AND warehouse_id=? AND demand_date=? AND source='WMS'
+            """,
+            (product["id"], warehouse["id"], dispatch_day),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert demand["quantity_sold"] == 2
+    assert client.get(f"/v1/products/{product['id']}", headers=headers).json()["quantity"] == 3
 
 
 def test_new_users_need_a_strong_password(client):
@@ -248,6 +404,17 @@ def test_new_users_need_a_strong_password(client):
     )
     assert created.status_code == 201, created.text
     assert created.json()["username"] == "warehouse-user"
+
+    duplicate = client.post(
+        "/v1/admin/users",
+        headers=headers,
+        json={
+            "username": " warehouse-user ",
+            "password": "a-second-long-password",
+            "role": "operator",
+        },
+    )
+    assert duplicate.status_code == 409
 
 
 def test_only_manual_movements_can_be_undone(client):
@@ -368,6 +535,90 @@ def test_rolling_average_forecast_zero_fills_missing_days_and_records_parameters
     assert parameters["series_limit"] == 1
     assert parameters["series_processed"] == 1
     assert parameters["predictions_written"] == 2
+
+
+def test_forecast_compatibility_endpoints_run_and_expose_wms_stock_risk(client):
+    assert client.get("/api/forecast/overview").status_code == 401
+
+    headers = auth_headers(client)
+    as_of_date = datetime.now(timezone.utc).date()
+    product, warehouse = seed_wms_demand(
+        client,
+        headers,
+        [4] * 7,
+        as_of_date - timedelta(days=6),
+    )
+
+    started = client.post(
+        "/api/forecast/run",
+        headers=headers,
+        json={
+            "source": "WMS",
+            "model": "rolling_average",
+            "window_days": 7,
+            "horizon_days": 28,
+            "series_limit": 1,
+            "as_of_date": as_of_date.isoformat(),
+        },
+    )
+    assert started.status_code == 201, started.text
+    run_id = started.json()["run_id"]
+    assert started.json()["requested_model"] == "rolling_average"
+
+    overview = client.get(
+        "/api/forecast/overview", headers=headers, params={"source": "WMS"}
+    )
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["latest_successful_run"]["id"] == run_id
+
+    runs = client.get(
+        "/api/forecast/runs", headers=headers, params={"source": "WMS"}
+    )
+    assert runs.status_code == 200, runs.text
+    assert runs.json()["meta"]["total"] == 1
+
+    products = client.get(
+        "/api/forecast/products",
+        headers=headers,
+        params={"run_id": run_id, "model_name": "Rolling average"},
+    )
+    assert products.status_code == 200, products.text
+    assert products.json()["data"][0]["product_id"] == product["id"]
+    assert products.json()["data"][0]["forecast_days"] == 28
+
+    product_forecast = client.get(
+        f"/api/forecast/products/{product['id']}",
+        headers=headers,
+        params={"run_id": run_id, "model_name": "Rolling average"},
+    )
+    assert product_forecast.status_code == 200, product_forecast.text
+    assert product_forecast.json()["summary"]["prediction_rows"] == 28
+
+    settings = client.put(
+        f"/api/products/{product['id']}/reorder-settings",
+        headers=headers,
+        json={
+            "warehouse_id": warehouse["id"],
+            "lead_time_days": 5,
+            "safety_stock": 30,
+        },
+    )
+    assert settings.status_code == 200, settings.text
+    assert settings.json()["warehouse_id"] == warehouse["id"]
+
+    stockout = client.post(
+        f"/api/forecast/runs/{run_id}/stockout-predictions",
+        headers=headers,
+        json={},
+    )
+    assert stockout.status_code == 200, stockout.text
+    assert stockout.json()["uses_live_inventory"] is True
+    assert stockout.json()["data"][0]["risk"] == "healthy"
+
+    alerts = client.get("/api/forecast/alerts", headers=headers)
+    assert alerts.status_code == 200, alerts.text
+    assert alerts.json()["forecast_warning"] is None
+    assert alerts.json()["forecast_alerts"]["meta"]["total"] == 0
 
 
 def test_arima_uses_recorded_fallback_for_short_history(client):

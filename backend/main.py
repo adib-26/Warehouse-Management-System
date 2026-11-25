@@ -2,9 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pymysql import MySQLError
 from database import DatabaseError, get_db, init_db
 from config import get_cors_origins, UPLOAD_DIR, validate_runtime_config
-from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin, warehouses, forecasting
+from routes import products, movements, suppliers, inbound, attachments, customers, outbound, auth, admin, warehouses, forecasting, batches
 
 
 @asynccontextmanager
@@ -13,7 +14,6 @@ async def lifespan(_app: FastAPI):
     init_db()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     yield
-
 
 app = FastAPI(title="NovaLedger WMS API", version="4.0.0", lifespan=lifespan)
 
@@ -38,6 +38,9 @@ app.include_router(inbound.router, prefix=f"{V1}/inbound-shipments", tags=["Inbo
 app.include_router(outbound.router, prefix=f"{V1}/outbound-shipments", tags=["Outbound Shipments"])
 app.include_router(warehouses.router, prefix=f"{V1}/warehouses", tags=["Warehouses"])
 app.include_router(forecasting.router, prefix=f"{V1}/forecasts", tags=["Forecasting"])
+app.include_router(forecasting.compat_router, prefix="/api/forecast", tags=["Forecasting Compatibility"])
+app.include_router(products.compat_reorder_router, prefix="/api/products", tags=["Product Reorder Settings Compatibility"])
+app.include_router(batches.router, prefix="/api", tags=["Inventory Batches"])
 app.include_router(attachments.router, prefix=f"{V1}/attachments", tags=["Attachments"])
 app.include_router(admin.router, prefix=f"{V1}/admin", tags=["Admin"])
 app.include_router(admin.audit_router, prefix=f"{V1}/audit-logs", tags=["Audit"])
@@ -54,7 +57,10 @@ def health():
     try:
         conn = get_db()
         conn.execute("SELECT 1").fetchone()
-    except (OSError, DatabaseError):
+    # get_db() wraps connection errors, but a server can also drop a connection
+    # between checkout and this probe. Health checks should consistently report
+    # that as an unavailable dependency rather than an application 500.
+    except (OSError, DatabaseError, MySQLError):
         raise HTTPException(status_code=503, detail="Database unavailable")
     finally:
         if conn is not None:
@@ -79,6 +85,7 @@ def v1_root():
             "outbound_shipments": f"{V1}/outbound-shipments",
             "warehouses": f"{V1}/warehouses",
             "forecasts": f"{V1}/forecasts",
+            "batches": "/api/batches",
             "attachments": f"{V1}/attachments",
             "admin": f"{V1}/admin",
             "audit_logs": f"{V1}/audit-logs",

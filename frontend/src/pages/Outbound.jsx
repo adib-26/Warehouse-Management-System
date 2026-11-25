@@ -1,6 +1,11 @@
 import { useEffect, useState, useRef } from "react";
 import { authFetch, downloadAttachment as apiDownloadAttachment } from "../api";
 import { useAuth } from "../AuthContext";
+import Dialog from "../components/Dialog";
+import BalanceStrip from "../components/BalanceStrip";
+import { useConfirm } from "../components/FeedbackProvider";
+import { formatPlainDate, formatQuantity, responseErrorMessage } from "../format";
+import PageHeader from "../components/PageHeader";
 
 function localDate() {
   const now = new Date();
@@ -8,23 +13,9 @@ function localDate() {
   return local.toISOString().slice(0, 10);
 }
 
-function Dialog({ open, onClose, title, children }) {
-  if (!open) return null;
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 640 }}>
-        <div className="dialog-header">
-          <h2 className="dialog-title">{title}</h2>
-          <button onClick={onClose} className="btn btn-ghost btn-xs" style={{ padding: "4px 8px", fontSize: 18 }}>&times;</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 export default function Outbound() {
   const { can } = useAuth();
+  const confirm = useConfirm();
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
@@ -100,9 +91,15 @@ export default function Outbound() {
       formData.append("file", file);
       const res = await authFetch(`/outbound-shipments/imports`, { method: "POST", body: formData });
       const data = await res.json();
+      if (!res.ok) {
+        setMessage({ type: "error", text: responseErrorMessage(data, "Could not import the outbound file.") });
+        return;
+      }
+      const rowErrors = Array.isArray(data.errors) ? data.errors : [];
+      const totalErrors = Number(data.total_errors) || rowErrors.length;
       setMessage({
-        type: "success",
-        text: `Imported ${data.imported} outbound records.${data.total_errors > 0 ? ` ${data.total_errors} errors: ${data.errors.join("; ")}` : ""}`,
+        type: totalErrors > 0 ? "warning" : "success",
+        text: `Imported ${data.imported} outbound records.${totalErrors > 0 ? ` ${totalErrors} row${totalErrors === 1 ? " was" : "s were"} rejected: ${rowErrors.join("; ") || "see the source file and correct the required values."}` : ""}`,
       });
       loadData();
     } catch {
@@ -111,6 +108,13 @@ export default function Outbound() {
       setUploading(false);
       setUploadFile(null);
     }
+  };
+
+  const selectBulkFile = (event) => {
+    const file = event.currentTarget.files?.[0];
+    // Let an operator correct and choose the same file again after a validation error.
+    event.currentTarget.value = "";
+    handleBulkUpload(file);
   };
 
   const handleDrop = (e) => {
@@ -156,31 +160,23 @@ export default function Outbound() {
   };
 
   const deleteAttachment = async (id) => {
-    if (!confirm("Delete this attachment?")) return;
+    const ok = await confirm({
+      title: "Remove attachment",
+      message: "Remove this attachment? This cannot be undone.",
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
+    if (!ok) return;
     await authFetch(`/attachments/${id}`, { method: "DELETE" });
     if (detailShipment) loadAttachments(detailShipment.id);
   };
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Outbound Stock</h1>
-          <p className="page-subtitle">Dispatch stock to customers and manage delivery orders</p>
-        </div>
-        {can("outbound", "write") && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              Bulk Upload
-              <input type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleBulkUpload(e.target.files[0])} />
-            </label>
-          </div>
-        )}
-      </div>
+      <PageHeader eyebrow="Supply Chain" title="Outbound Stock" subtitle="What's going out to customers" />
 
       {message && (
-        <div className={`alert alert-${message.type}`} style={{ marginBottom: 20 }}>
+        <div className={`alert alert-${message.type}`} role={message.type === "error" ? "alert" : "status"} style={{ marginBottom: 20 }}>
           <span>{message.text}</span>
           <button className="btn btn-ghost btn-xs" style={{ padding: "2px 8px" }} onClick={() => setMessage(null)}>&times;</button>
         </div>
@@ -206,7 +202,7 @@ export default function Outbound() {
                 <select className="select" value={form.product_id} onChange={e => setForm({ ...form, product_id: e.target.value })} required>
                   <option value="">Select product...</option>
                   {products.filter(p => !p.archived && !p.is_forecast_test).map(p => (
-                    <option key={p.id} value={p.id}>{p.name} ({p.sku}) - {p.quantity} in stock</option>
+                    <option key={p.id} value={p.id}>{p.name} ({p.sku}) - {formatQuantity(p.quantity)} in stock</option>
                   ))}
                 </select>
               </div>
@@ -230,7 +226,7 @@ export default function Outbound() {
               </div>
               <div className="input-group">
                 <label className="input-label">Quantity *</label>
-                <input className="input" type="number" min="1" value={form.quantity} onChange={e => setForm({ ...form, quantity: Number(e.target.value) })} required />
+                <input className="input" type="number" min="0.01" step="0.01" value={form.quantity} onChange={e => setForm({ ...form, quantity: Number(e.target.value) })} required />
               </div>
               <div className="input-group">
                 <label className="input-label">SO / Ref #</label>
@@ -246,20 +242,24 @@ export default function Outbound() {
               </div>
             </div>
 
-            {selectedProduct && !insufficientStock && (
-              <div className="alert alert-success" style={{ marginBottom: 16 }}>
-                <span>
-                  Current stock of <strong>{selectedProduct.name}</strong>: {selectedProduct.quantity} units.
-                  After dispatch: <strong>{selectedProduct.quantity - form.quantity}</strong> units.
-                </span>
-              </div>
-            )}
-
-            {selectedProduct && insufficientStock && (
-              <div className="alert alert-error" style={{ marginBottom: 16 }}>
-                <span>
-                  Insufficient stock: only <strong>{selectedProduct.quantity}</strong> unit{selectedProduct.quantity !== 1 ? "s" : ""} of <strong>{selectedProduct.name}</strong> available. Negative stock dispatch is not allowed.
-                </span>
+            {selectedProduct && (
+              <div style={{ display: "grid", gap: 12, marginBottom: 16 }}>
+                <BalanceStrip
+                  title={selectedProduct.name}
+                  subtitle={`SKU ${selectedProduct.sku}`}
+                  current={Number(selectedProduct.quantity)}
+                  after={Number(selectedProduct.quantity) - (Number(form.quantity) || 0)}
+                  tone={Number(form.quantity) > 0 ? "negative" : "neutral"}
+                />
+                {insufficientStock && (
+                  <div className="alert alert-error" role="alert">
+                    <span>
+                      Insufficient stock: only <strong>{formatQuantity(selectedProduct.quantity)}</strong> unit
+                      {Number(selectedProduct.quantity) !== 1 ? "s" : ""} of <strong>{selectedProduct.name}</strong> available.
+                      Negative stock dispatch is not allowed.
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -283,6 +283,15 @@ export default function Outbound() {
             onDragLeave={() => setDragging(false)}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={event => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label="Upload outbound CSV or XLSX file"
           >
             <div style={{ marginBottom: 8 }}>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" strokeWidth="1.5" style={{ margin: "0 auto" }}>
@@ -292,15 +301,15 @@ export default function Outbound() {
             <div className="dropzone-text">
               <strong>Drag & drop a CSV/XLSX file here</strong>
               <br />
-              or click to browse. Must include: product_name or sku, customer_name, quantity. Add warehouse_code to attribute WMS demand.
+              or click to browse. Required: product_name or sku, customer_name, warehouse_code, and quantity. The warehouse code must match an active warehouse.
             </div>
-            <input ref={fileInputRef} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleBulkUpload(e.target.files[0])} />
+            <input ref={fileInputRef} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={selectBulkFile} />
           </div>
         </div>
       </div>
       )}
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Outbound shipments">
         <table>
           <thead>
             <tr>
@@ -324,8 +333,8 @@ export default function Outbound() {
             ) : (
               shipments.map(s => (
                 <tr key={s.id}>
-                  <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", whiteSpace: "nowrap" }}>
-                    {s.dispatch_date || "-"}
+                  <td className="mono" style={{ color: "var(--text-secondary)", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
+                    {formatPlainDate(s.dispatch_date)}
                   </td>
                   <td>
                     <div style={{ fontWeight: 600 }}>{s.product_name}</div>
@@ -341,7 +350,7 @@ export default function Outbound() {
                     ) : <span className="muted">Legacy / unassigned</span>}
                   </td>
                   <td>
-                    <span style={{ fontWeight: 700, color: "var(--red, #ef4444)" }}>-{s.quantity}</span>
+                    <span className="ledger-num ledger-num--down">-{formatQuantity(s.quantity)}</span>
                   </td>
                   <td>
                     {s.so_ref ? (
@@ -367,7 +376,7 @@ export default function Outbound() {
         </table>
       </div>
 
-      <Dialog open={!!detailShipment} onClose={() => { setDetailShipment(null); setAttachments([]); }} title="Outbound Shipment Details">
+      <Dialog open={!!detailShipment} onClose={() => { setDetailShipment(null); setAttachments([]); }} title="Outbound Shipment Details" maxWidth={640}>
         {detailShipment && (
           <div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
@@ -387,11 +396,11 @@ export default function Outbound() {
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Quantity</div>
-                <div style={{ fontWeight: 700, color: "var(--red, #ef4444)" }}>-{detailShipment.quantity}</div>
+                <div className="ledger-num ledger-num--down">-{formatQuantity(detailShipment.quantity)}</div>
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Dispatched</div>
-                <div>{detailShipment.dispatch_date || "-"}</div>
+                <div>{formatPlainDate(detailShipment.dispatch_date)}</div>
               </div>
               {detailShipment.so_ref && (
                 <div>

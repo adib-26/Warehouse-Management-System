@@ -1,0 +1,24 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: novaledger_test
+      MYSQL_USER: novaledger
+      MYSQL_PASSWORD: ${TEST_MYSQL_PASSWORD:-novaledger-test-password}
+      MYSQL_ROOT_PASSWORD: ${TEST_MYSQL_ROOT_PASSWORD:-novaledger-test-root-password}
+    ports:
+      - "127.0.0.1:${TEST_MYSQL_PORT:-3307}:3306"
+    # Test-only runtime state is separate from the application's MySQL volume.
+    tmpfs:
+      - /var/run/mysqld
+    volumes:
+      - mysql-api-test-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+
+volumes:
+  mysql-api-test-data:

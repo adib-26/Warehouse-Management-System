@@ -1,29 +1,30 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
-
+import { useToast } from "../components/FeedbackProvider";
+import { responseErrorMessage } from "../format";
+import PageHeader from "../components/PageHeader";
 
 const emptyForm = { warehouse_code: "", name: "", address: "" };
 
-
 export default function Warehouses() {
   const { can } = useAuth();
+  const toast = useToast();
   const [warehouses, setWarehouses] = useState([]);
   const [form, setForm] = useState(emptyForm);
-  const [message, setMessage] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const loadWarehouses = async () => {
+  const loadWarehouses = useCallback(async () => {
     try {
       const response = await authFetch("/warehouses?include_inactive=true&limit=500");
       const data = await response.json();
       if (response.ok) setWarehouses(data.data || []);
     } catch {
-      setMessage({ type: "error", text: "Could not load warehouses." });
+      toast.error("Could not load warehouses.");
     }
-  };
+  }, [toast]);
 
-  useEffect(() => { loadWarehouses(); }, []);
+  useEffect(() => { loadWarehouses(); }, [loadWarehouses]);
 
   const createWarehouse = async (event) => {
     event.preventDefault();
@@ -37,14 +38,14 @@ export default function Warehouses() {
       });
       const data = await response.json();
       if (!response.ok) {
-        setMessage({ type: "error", text: data.detail || "Could not create warehouse." });
+        toast.error(responseErrorMessage(data, "Could not create warehouse."));
         return;
       }
       setForm(emptyForm);
-      setMessage({ type: "success", text: `${data.name} is ready for outbound dispatches.` });
+      toast.success(`${data.name} is ready for outbound dispatches.`);
       loadWarehouses();
     } catch {
-      setMessage({ type: "error", text: "Could not reach the API." });
+      toast.error("Could not reach the API.");
     } finally {
       setSaving(false);
     }
@@ -59,49 +60,39 @@ export default function Warehouses() {
       });
       const data = await response.json();
       if (!response.ok) {
-        setMessage({ type: "error", text: data.detail || "Could not update warehouse." });
+        toast.error(responseErrorMessage(data, "Could not update warehouse."));
         return;
       }
-      setMessage({ type: "success", text: `${data.name} is now ${data.active ? "active" : "inactive"}.` });
+      toast.success(`${data.name} is now ${data.active ? "active" : "inactive"}.`);
       loadWarehouses();
     } catch {
-      setMessage({ type: "error", text: "Could not reach the API." });
+      toast.error("Could not reach the API.");
     }
   };
 
+  const canWrite = can("admin", "write");
+
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Warehouses</h1>
-          <p className="page-subtitle">Manage the locations used to attribute completed outbound demand.</p>
-        </div>
-      </div>
+      <PageHeader eyebrow="Administration" title="Warehouses" subtitle="Where stock is held" />
 
-      {message && (
-        <div className={`alert alert-${message.type}`} style={{ marginBottom: 20 }}>
-          <span>{message.text}</span>
-          <button className="btn btn-ghost btn-xs" style={{ padding: "2px 8px" }} onClick={() => setMessage(null)}>&times;</button>
-        </div>
-      )}
-
-      {can("admin", "write") && (
+      {canWrite && (
         <div className="card" style={{ marginBottom: 20 }}>
           <div className="card-body">
-            <h3 className="section-title">Add Warehouse</h3>
+            <h2 className="section-title">Add Warehouse</h2>
             <form onSubmit={createWarehouse}>
               <div className="form-grid" style={{ marginBottom: 16 }}>
                 <div className="input-group">
-                  <label className="input-label">Warehouse Code *</label>
-                  <input className="input" placeholder="KL-01" value={form.warehouse_code} onChange={e => setForm({ ...form, warehouse_code: e.target.value })} required />
+                  <label className="input-label" htmlFor="warehouse-code">Warehouse Code *</label>
+                  <input id="warehouse-code" className="input" placeholder="KL-01" value={form.warehouse_code} onChange={e => setForm({ ...form, warehouse_code: e.target.value })} required />
                 </div>
                 <div className="input-group">
-                  <label className="input-label">Name *</label>
-                  <input className="input" placeholder="Kuala Lumpur Main" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
+                  <label className="input-label" htmlFor="warehouse-name">Name *</label>
+                  <input id="warehouse-name" className="input" placeholder="Kuala Lumpur Main" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
                 </div>
                 <div className="input-group" style={{ gridColumn: "1 / -1" }}>
-                  <label className="input-label">Address</label>
-                  <input className="input" placeholder="Optional address or location note" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} />
+                  <label className="input-label" htmlFor="warehouse-address">Address</label>
+                  <input id="warehouse-address" className="input" placeholder="Optional address or location note" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} />
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -114,7 +105,7 @@ export default function Warehouses() {
         </div>
       )}
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Warehouses">
         <table>
           <thead>
             <tr>
@@ -122,27 +113,27 @@ export default function Warehouses() {
               <th>Code</th>
               <th>Address</th>
               <th>Status</th>
-              {can("admin", "write") && <th style={{ textAlign: "right" }}>Actions</th>}
+              {canWrite && <th style={{ textAlign: "right" }}>Actions</th>}
             </tr>
           </thead>
           <tbody>
             {warehouses.length === 0 ? (
               <tr>
-                <td colSpan={can("admin", "write") ? 5 : 4} className="empty-state">
+                <td colSpan={canWrite ? 5 : 4} className="empty-state">
                   <div className="empty-state-text">No warehouses yet</div>
                 </td>
               </tr>
             ) : warehouses.map(warehouse => (
               <tr key={warehouse.id}>
                 <td style={{ fontWeight: 600 }}>{warehouse.name}</td>
-                <td><span className="badge badge-neutral">{warehouse.warehouse_code}</span></td>
-                <td className="muted">{warehouse.address || "-"}</td>
+                <td><span className="badge badge-neutral mono">{warehouse.warehouse_code}</span></td>
+                <td className="muted">{warehouse.address || "—"}</td>
                 <td>
                   <span className={`badge ${warehouse.active ? "badge-success" : "badge-neutral"}`}>
                     {warehouse.active ? "Active" : "Inactive"}
                   </span>
                 </td>
-                {can("admin", "write") && (
+                {canWrite && (
                   <td style={{ textAlign: "right" }}>
                     <button className="btn btn-ghost btn-xs" onClick={() => setActive(warehouse, !warehouse.active)}>
                       {warehouse.active ? "Deactivate" : "Activate"}

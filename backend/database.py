@@ -12,6 +12,7 @@ class DatabaseError(Exception):
 
 from config import (
     APP_ENV,
+    DATABASE_PASSWORD,
     DATABASE_URL,
     INITIAL_ADMIN_PASSWORD,
     INITIAL_ADMIN_USERNAME,
@@ -20,7 +21,7 @@ from config import (
 )
 
 BASE_SCHEMA_VERSION = 2
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 11
 
 DATA_TABLES = (
     "forecast_evaluation_metrics",
@@ -32,11 +33,12 @@ DATA_TABLES = (
     "forecast_runs",
     "audit_logs",
     "attachments",
+    "outbound_batch_allocations",
+    "inventory_batches",
     "movements",
     "inbound_shipments",
     "outbound_shipments",
     "warehouses",
-    "inventory_batches",
     "permissions",
     "users",
     "products",
@@ -150,11 +152,19 @@ def _connection_kwargs():
     database = parsed.path.lstrip("/")
     if not parsed.hostname or not parsed.username or not database:
         raise RuntimeError("DATABASE_URL must include a user, host, and database name")
+    # Compose and other orchestrators can provide the password separately so
+    # generated secrets never have to be percent-encoded into a URL. Preserve
+    # the URL password for existing deployments when no override is supplied.
+    password = (
+        DATABASE_PASSWORD
+        if DATABASE_PASSWORD is not None
+        else unquote(parsed.password or "")
+    )
     return {
         "host": parsed.hostname,
         "port": parsed.port or 3306,
         "user": unquote(parsed.username),
-        "password": unquote(parsed.password or ""),
+        "password": password,
         "database": database,
         "charset": "utf8mb4",
         "autocommit": False,
@@ -189,6 +199,20 @@ def _ensure_index(cur, table_name, name, statement):
     ).fetchone()
     if int(existing["n"]) == 0:
         cur.execute(statement)
+
+
+def _index_exists(cur, table_name, name) -> bool:
+    row = cur.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = ?
+          AND index_name = ?
+        """,
+        (table_name, name),
+    ).fetchone()
+    return int(row["n"]) > 0
 
 
 def _ensure_innodb(cur, table_name):
@@ -240,6 +264,22 @@ def _ensure_foreign_key(cur, table_name, constraint_name, statement):
           AND table_name = ?
           AND constraint_name = ?
           AND constraint_type = 'FOREIGN KEY'
+        """,
+        (table_name, constraint_name),
+    ).fetchone()
+    if int(existing["n"]) == 0:
+        cur.execute(statement)
+
+
+def _ensure_check_constraint(cur, table_name, constraint_name, statement):
+    existing = cur.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM information_schema.table_constraints
+        WHERE constraint_schema = DATABASE()
+          AND table_name = ?
+          AND constraint_name = ?
+          AND constraint_type = 'CHECK'
         """,
         (table_name, constraint_name),
     ).fetchone()
@@ -648,6 +688,262 @@ def _migration_8_forecast_evaluation_metrics(cur):
     )
 
 
+def _migration_9_batch_inventory(cur):
+    """Add lot-level stock, expiry, and outbound allocation tracking."""
+    for table_name in (
+        "products",
+        "suppliers",
+        "movements",
+        "inbound_shipments",
+        "outbound_shipments",
+        "warehouses",
+        "inventory_batches",
+    ):
+        _ensure_innodb(cur, table_name)
+
+    if not _column_exists(cur, "products", "batch_tracking_enabled_at"):
+        cur.execute(
+            "ALTER TABLE products ADD COLUMN batch_tracking_enabled_at DATETIME NULL"
+        )
+
+    # Existing schema versions had a small, unused batch table. Copy its values
+    # into the richer lot model before removing the old aliases. Legacy lots
+    # have no trustworthy warehouse assignment, so they remain blocked until a
+    # manager updates them with a real warehouse.
+    # Foreign-key columns match the existing INT primary keys in products,
+    # warehouses, and suppliers. New batch/allocation surrogate IDs are BIGINT.
+    columns = {
+        "batch_number": "VARCHAR(100) NULL",
+        "warehouse_id": "INT NULL",
+        "supplier_id": "INT NULL",
+        "received_quantity": "DECIMAL(12,2) NOT NULL DEFAULT 0",
+        "remaining_quantity": "DECIMAL(12,2) NOT NULL DEFAULT 0",
+        "manufacturing_date": "DATE NULL",
+        "received_date": "DATETIME NULL",
+        "status": "VARCHAR(30) NOT NULL DEFAULT 'available'",
+    }
+    for column_name, definition in columns.items():
+        if not _column_exists(cur, "inventory_batches", column_name):
+            cur.execute(
+                f"ALTER TABLE inventory_batches ADD COLUMN `{column_name}` {definition}"
+            )
+
+    if _column_exists(cur, "inventory_batches", "batch_code"):
+        cur.execute(
+            "UPDATE inventory_batches "
+            "SET batch_number=COALESCE(NULLIF(batch_number, ''), batch_code)"
+        )
+    if _column_exists(cur, "inventory_batches", "quantity"):
+        cur.execute(
+            "UPDATE inventory_batches "
+            "SET received_quantity=quantity, remaining_quantity=quantity "
+            "WHERE received_quantity=0 AND remaining_quantity=0"
+        )
+    if _column_exists(cur, "inventory_batches", "received_at"):
+        cur.execute(
+            "UPDATE inventory_batches SET received_date=received_at "
+            "WHERE received_date IS NULL"
+        )
+    cur.execute(
+        "UPDATE inventory_batches SET batch_number=CONCAT('LEGACY-', id) "
+        "WHERE batch_number IS NULL OR batch_number=''"
+    )
+    cur.execute(
+        "UPDATE inventory_batches SET received_date=UTC_TIMESTAMP() "
+        "WHERE received_date IS NULL"
+    )
+    cur.execute(
+        "UPDATE inventory_batches SET status=CASE "
+        "WHEN remaining_quantity<=0 THEN 'depleted' "
+        "WHEN warehouse_id IS NULL THEN 'blocked' ELSE status END"
+    )
+    cur.execute(
+        "UPDATE products p JOIN ("
+        "SELECT product_id, MIN(received_date) AS enabled_at "
+        "FROM inventory_batches GROUP BY product_id"
+        ") b ON b.product_id=p.id "
+        "SET p.batch_tracking_enabled_at=COALESCE(p.batch_tracking_enabled_at, b.enabled_at)"
+    )
+
+    cur.execute(
+        "ALTER TABLE inventory_batches "
+        "MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT, "
+        "MODIFY COLUMN batch_number VARCHAR(100) NOT NULL, "
+        "MODIFY COLUMN received_quantity DECIMAL(12,2) NOT NULL, "
+        "MODIFY COLUMN remaining_quantity DECIMAL(12,2) NOT NULL, "
+        "MODIFY COLUMN received_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "MODIFY COLUMN status VARCHAR(30) NOT NULL DEFAULT 'available'"
+    )
+
+    # Install the new product-leading index before dropping the legacy expiry
+    # index, which MySQL may currently be using to support the product FK.
+    _ensure_index(
+        cur,
+        "inventory_batches",
+        "idx_inventory_batch_pick",
+        "CREATE INDEX idx_inventory_batch_pick "
+        "ON inventory_batches (product_id, warehouse_id, status, expiry_date, received_date, id)",
+    )
+
+    if _column_exists(cur, "inventory_batches", "batch_code"):
+        if _index_exists(cur, "inventory_batches", "uq_batch_code"):
+            cur.execute("ALTER TABLE inventory_batches DROP INDEX uq_batch_code")
+        if _index_exists(cur, "inventory_batches", "idx_batches_expiry"):
+            cur.execute("ALTER TABLE inventory_batches DROP INDEX idx_batches_expiry")
+    legacy_columns = [
+        name
+        for name in ("batch_code", "quantity", "received_at")
+        if _column_exists(cur, "inventory_batches", name)
+    ]
+    if legacy_columns:
+        drop_columns = ", ".join(f"DROP COLUMN `{name}`" for name in legacy_columns)
+        cur.execute(f"ALTER TABLE inventory_batches {drop_columns}")
+
+    # The existing WMS stores quantities as whole units. Use decimal columns
+    # throughout stock-bearing records so batch lots can safely contain partial
+    # units and totals still reconcile exactly.
+    cur.execute(
+        "ALTER TABLE products "
+        "MODIFY COLUMN quantity DECIMAL(12,2) NOT NULL DEFAULT 0, "
+        "MODIFY COLUMN low_stock DECIMAL(12,2) NOT NULL DEFAULT 10"
+    )
+    cur.execute("ALTER TABLE movements MODIFY COLUMN delta DECIMAL(12,2) NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE inbound_shipments MODIFY COLUMN quantity DECIMAL(12,2) NOT NULL")
+    cur.execute("ALTER TABLE outbound_shipments MODIFY COLUMN quantity DECIMAL(12,2) NOT NULL")
+
+    if not _column_exists(cur, "movements", "batch_id"):
+        cur.execute("ALTER TABLE movements ADD COLUMN batch_id BIGINT NULL")
+    if not _column_exists(cur, "movements", "warehouse_id"):
+        cur.execute("ALTER TABLE movements ADD COLUMN warehouse_id INT NULL")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outbound_batch_allocations (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            outbound_id INT NOT NULL,
+            batch_id BIGINT NOT NULL,
+            quantity DECIMAL(12,2) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_outbound_batch_allocation (outbound_id, batch_id),
+            KEY idx_batch_allocations_batch_created (batch_id, created_at),
+            CONSTRAINT ck_outbound_batch_allocation_quantity CHECK (quantity > 0),
+            CONSTRAINT fk_batch_allocation_outbound FOREIGN KEY (outbound_id)
+                REFERENCES outbound_shipments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+            CONSTRAINT fk_batch_allocation_batch FOREIGN KEY (batch_id)
+                REFERENCES inventory_batches(id) ON DELETE RESTRICT ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+    _ensure_index(
+        cur,
+        "inventory_batches",
+        "uq_inventory_batch_product_number",
+        "CREATE UNIQUE INDEX uq_inventory_batch_product_number "
+        "ON inventory_batches (product_id, batch_number)",
+    )
+    _ensure_index(
+        cur,
+        "inventory_batches",
+        "idx_inventory_batch_pick",
+        "CREATE INDEX idx_inventory_batch_pick "
+        "ON inventory_batches (product_id, warehouse_id, status, expiry_date, received_date, id)",
+    )
+    _ensure_index(
+        cur,
+        "outbound_batch_allocations",
+        "idx_batch_allocations_outbound_created",
+        "CREATE INDEX idx_batch_allocations_outbound_created "
+        "ON outbound_batch_allocations (outbound_id, created_at)",
+    )
+
+    _ensure_foreign_key(
+        cur,
+        "inventory_batches",
+        "fk_batches_product",
+        "ALTER TABLE inventory_batches ADD CONSTRAINT fk_batches_product "
+        "FOREIGN KEY (product_id) REFERENCES products(id) "
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+    )
+    _ensure_foreign_key(
+        cur,
+        "inventory_batches",
+        "fk_inventory_batch_warehouse",
+        "ALTER TABLE inventory_batches ADD CONSTRAINT fk_inventory_batch_warehouse "
+        "FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) "
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+    )
+    _ensure_foreign_key(
+        cur,
+        "inventory_batches",
+        "fk_inventory_batch_supplier",
+        "ALTER TABLE inventory_batches ADD CONSTRAINT fk_inventory_batch_supplier "
+        "FOREIGN KEY (supplier_id) REFERENCES suppliers(id) "
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+    )
+    _ensure_foreign_key(
+        cur,
+        "movements",
+        "fk_movement_batch",
+        "ALTER TABLE movements ADD CONSTRAINT fk_movement_batch "
+        "FOREIGN KEY (batch_id) REFERENCES inventory_batches(id) "
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+    )
+    _ensure_foreign_key(
+        cur,
+        "movements",
+        "fk_movement_warehouse",
+        "ALTER TABLE movements ADD CONSTRAINT fk_movement_warehouse "
+        "FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) "
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+    )
+    _ensure_check_constraint(
+        cur,
+        "inventory_batches",
+        "ck_inventory_batch_quantities",
+        "ALTER TABLE inventory_batches ADD CONSTRAINT ck_inventory_batch_quantities "
+        "CHECK (received_quantity >= 0 AND remaining_quantity >= 0 "
+        "AND remaining_quantity <= received_quantity)",
+    )
+    _ensure_check_constraint(
+        cur,
+        "inventory_batches",
+        "ck_inventory_batch_status",
+        "ALTER TABLE inventory_batches ADD CONSTRAINT ck_inventory_batch_status "
+        "CHECK (status IN ('available', 'blocked', 'expired', 'depleted'))",
+    )
+
+
+def _migration_10_batch_tracking_cutover(cur):
+    """Prevent historical outbound rows from being allocated as new demand."""
+    cur.execute(
+        "UPDATE products p JOIN ("
+        "SELECT DISTINCT product_id FROM inventory_batches"
+        ") b ON b.product_id=p.id "
+        "SET p.batch_tracking_enabled_at=UTC_TIMESTAMP() "
+        "WHERE p.batch_tracking_enabled_at IS NOT NULL"
+    )
+
+
+def _migration_11_batch_traceability_indexes(cur):
+    """Index lot traceability queries without changing inventory balances."""
+    _ensure_innodb(cur, "movements")
+    _ensure_index(
+        cur,
+        "movements",
+        "idx_movements_batch_created",
+        "CREATE INDEX idx_movements_batch_created "
+        "ON movements (batch_id, created_at)",
+    )
+    _ensure_index(
+        cur,
+        "movements",
+        "idx_movements_warehouse_created",
+        "CREATE INDEX idx_movements_warehouse_created "
+        "ON movements (warehouse_id, created_at)",
+    )
+
+
 SCHEMA_MIGRATIONS = {
     3: _migration_3_forecasting_schema,
     4: _migration_4_forecasting_hardening,
@@ -655,6 +951,9 @@ SCHEMA_MIGRATIONS = {
     6: _migration_6_forecast_run_parameters,
     7: _migration_7_forecast_results_per_model,
     8: _migration_8_forecast_evaluation_metrics,
+    9: _migration_9_batch_inventory,
+    10: _migration_10_batch_tracking_cutover,
+    11: _migration_11_batch_traceability_indexes,
 }
 
 
@@ -851,12 +1150,6 @@ def _create_schema(cur):
         "outbound_shipments",
         "idx_outbound_created",
         "CREATE INDEX idx_outbound_created ON outbound_shipments (created_at)",
-    )
-    _ensure_index(
-        cur,
-        "inventory_batches",
-        "idx_batches_expiry",
-        "CREATE INDEX idx_batches_expiry ON inventory_batches (product_id, expiry_date, received_at)",
     )
     _ensure_index(
         cur,

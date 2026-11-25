@@ -24,6 +24,10 @@ WAREHOUSE_CODE_PREFIX = "M5-TEST::"
 MAPPING_COLUMNS = ("item_id", "store_id", "product_id", "warehouse_id")
 LOCK_NAME = "novaledger_m5_reference_bootstrap"
 
+sys.path.insert(0, str(ROOT / "scripts"))
+from project_env import load_project_env  # noqa: E402
+
+load_project_env(ROOT)
 sys.path.insert(0, str(ROOT / "backend"))
 from database import get_db  # noqa: E402
 
@@ -120,9 +124,32 @@ def require_schema(cur):
         cur.execute("SELECT is_forecast_test FROM warehouses LIMIT 0")
     except Exception as exc:
         raise RuntimeError(
-            "Forecast schema version 5 is required. Start the NovaLedger backend "
-            "once to apply migrations before bootstrapping M5 test records."
+            "The NovaLedger forecast schema with M5 test-record support is required. "
+            "Start the backend once to apply migrations before bootstrapping M5 "
+            "test records."
         ) from exc
+
+
+def validate_mapping_output_path(sales_path: Path, output_path: Path, force: bool):
+    """Reject unsafe mapping targets before catalog records are changed."""
+
+    if sales_path.resolve() == output_path.resolve():
+        raise ValueError("Mapping output cannot overwrite the M5 sales source")
+    if output_path.exists() or output_path.is_symlink():
+        if not output_path.is_file():
+            raise ValueError(
+                "Mapping output path must be a regular file or a new path: "
+                f"{output_path}"
+            )
+        if not force:
+            raise FileExistsError(
+                f"Mapping file already exists: {output_path} (use --force to replace it)"
+            )
+    if output_path.parent.exists() and not output_path.parent.is_dir():
+        raise ValueError(
+            "Mapping output parent must be a directory or a new path: "
+            f"{output_path.parent}"
+        )
 
 
 def existing_products(cur, skus: list[str]) -> dict:
@@ -157,9 +184,10 @@ def existing_warehouses(cur, codes: list[str]) -> dict:
     return result
 
 
-def write_mapping(path: Path, series, product_ids, warehouse_ids, force: bool):
-    if path.exists() and not force:
-        raise FileExistsError(f"Mapping file already exists: {path} (use --force to replace it)")
+def write_mapping(
+    sales_path: Path, path: Path, series, product_ids, warehouse_ids, force: bool
+):
+    validate_mapping_output_path(sales_path, path, force)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
     try:
@@ -217,10 +245,7 @@ def bootstrap(
         set(product_skus.values())
         | {sku for candidates in legacy_skus_by_item.values() for sku in candidates}
     )
-    if output_path.exists() and not force:
-        raise FileExistsError(
-            f"Mapping file already exists: {output_path} (use --force to replace it)"
-        )
+    validate_mapping_output_path(sales_path, output_path, force)
     if dry_run:
         return {
             "series_count": len(series),
@@ -247,7 +272,6 @@ def bootstrap(
                     not canonical["is_forecast_test"]
                     or canonical["deleted"]
                     or canonical["archived"]
-                    or canonical["quantity"] != 0
                 ):
                     raise ValueError(
                         "Existing canonical M5 product conflicts with test isolation: "
@@ -355,7 +379,7 @@ def bootstrap(
             for store_id, code in warehouse_codes.items()
         }
         conn.commit()
-        write_mapping(output_path, series, product_ids, warehouse_ids, force)
+        write_mapping(sales_path, output_path, series, product_ids, warehouse_ids, force)
         return {
             "series_count": len(series),
             "item_count": len(item_ids),

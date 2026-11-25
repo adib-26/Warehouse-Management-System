@@ -2,9 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NovaLedger - Warehouse Management</title>
+    <!-- Declare support for both schemes so the browser themes native UI and
+         avoids a white flash before CSS loads. theme-init.js may pin one. -->
+    <meta name="color-scheme" content="light dark" />
+    <script src="/theme-init.js"></script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0a0f1a" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f1f5f9" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="NovaLedger — warehouse management, inventory, and demand forecasting." />
+    <title>NovaLedger — Warehouse Management</title>
   </head>
   <body>
     <div id="root"></div>

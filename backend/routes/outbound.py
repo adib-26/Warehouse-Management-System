@@ -5,15 +5,37 @@ from file_utils import read_upload, safe_filename, write_upload_file
 from schemas import OutboundCreate
 from security import require_permission, log_audit
 from typing import Optional
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 import csv
 import io
 import os
 import uuid
+from routes.batches import allocate_outbound_shipment
 
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+CENT = Decimal("0.01")
+
+
+def _quantity_decimal(value) -> Decimal:
+    try:
+        quantity = Decimal(str(value or 0))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Quantity must be a number with at most two decimal places") from exc
+    if not quantity.is_finite() or quantity != quantity.quantize(CENT):
+        raise ValueError("Quantity must be a finite number with at most two decimal places")
+    return quantity.quantize(CENT)
+
+
+def _display_quantity(value: Decimal):
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _business_today() -> date:
+    """Use the same UTC business date configured for database connections."""
+    return datetime.now(timezone.utc).date()
 
 
 def _cell_text(value) -> str:
@@ -23,17 +45,23 @@ def _cell_text(value) -> str:
 
 def _import_date(value, row_number: int) -> str:
     if value is None or _cell_text(value) == "":
-        return date.today().isoformat()
+        return _business_today().isoformat()
     if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    try:
-        return date.fromisoformat(_cell_text(value)).isoformat()
-    except ValueError as exc:
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        try:
+            parsed = date.fromisoformat(_cell_text(value))
+        except ValueError as exc:
+            raise ValueError(
+                f"Row {row_number}: dispatch_date must use YYYY-MM-DD"
+            ) from exc
+    if parsed > _business_today():
         raise ValueError(
-            f"Row {row_number}: dispatch_date must use YYYY-MM-DD"
-        ) from exc
+            f"Row {row_number}: dispatch_date cannot be in the future"
+        )
+    return parsed.isoformat()
 
 
 @router.post("", status_code=201)
@@ -49,9 +77,10 @@ def create_outbound(
 
         product = cur.execute(
             """
-            SELECT id, name, quantity
+            SELECT id, name, quantity, batch_tracking_enabled_at
             FROM products
             WHERE id=? AND deleted=0 AND archived=0 AND is_forecast_test=0
+            FOR UPDATE
             """,
             (ob.product_id,),
         ).fetchone()
@@ -65,43 +94,33 @@ def create_outbound(
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
 
-        if ob.warehouse_id is not None:
-            warehouse = cur.execute(
-                """
-                SELECT id FROM warehouses
-                WHERE id=? AND active=1 AND is_forecast_test=0
-                """,
-                (ob.warehouse_id,),
-            ).fetchone()
-            if not warehouse:
-                raise HTTPException(status_code=404, detail="Warehouse not found or inactive")
+        warehouse = cur.execute(
+            """
+            SELECT id FROM warehouses
+            WHERE id=? AND active=1 AND is_forecast_test=0
+            """,
+            (ob.warehouse_id,),
+        ).fetchone()
+        if not warehouse:
+            raise HTTPException(status_code=404, detail="Warehouse not found or inactive")
 
-        if ob.quantity <= 0:
+        quantity = _quantity_decimal(ob.quantity)
+        available_quantity = _quantity_decimal(product["quantity"])
+        if quantity <= 0:
             raise HTTPException(status_code=400, detail="Quantity must be positive")
-        if ob.quantity > product["quantity"]:
+        if quantity > available_quantity:
             raise HTTPException(
                 status_code=400,
                 detail=f"Insufficient stock (available: {product['quantity']})",
             )
 
-        dispatch_date = (ob.dispatch_date or date.today()).isoformat()
-        cur.execute(
-            """
-            UPDATE products
-            SET quantity=quantity - ?, updated_at=datetime('now')
-            WHERE id=? AND is_forecast_test=0 AND quantity >= ?
-            """,
-            (ob.quantity, ob.product_id, ob.quantity),
-        )
-        if cur.rowcount != 1:
-            available = cur.execute(
-                "SELECT quantity FROM products WHERE id=?", (ob.product_id,)
-            ).fetchone()[0]
+        dispatch_day = ob.dispatch_date or _business_today()
+        if dispatch_day > _business_today():
             raise HTTPException(
-                status_code=409,
-                detail=f"Insufficient stock (available: {available})",
+                status_code=422,
+                detail="dispatch_date cannot be in the future",
             )
-
+        dispatch_date = dispatch_day.isoformat()
         cur.execute(
             """
             INSERT INTO outbound_shipments
@@ -112,7 +131,7 @@ def create_outbound(
                 ob.product_id,
                 ob.customer_id,
                 ob.warehouse_id,
-                ob.quantity,
+                quantity,
                 ob.so_ref,
                 dispatch_date,
                 ob.notes,
@@ -120,30 +139,47 @@ def create_outbound(
         )
         shipment_id = cur.lastrowid
 
-        if ob.warehouse_id is not None:
+        batch_tracked = bool(product["batch_tracking_enabled_at"])
+        if batch_tracked:
+            allocate_outbound_shipment(
+                cur,
+                int(shipment_id),
+                "AUTO",
+            )
+            new_qty = available_quantity - quantity
+        else:
+            cur.execute(
+                "UPDATE products SET quantity=quantity-?, updated_at=UTC_TIMESTAMP() "
+                "WHERE id=? AND is_forecast_test=0 AND quantity>=?",
+                (quantity, ob.product_id, quantity),
+            )
+            if cur.rowcount != 1:
+                raise HTTPException(status_code=409, detail="Insufficient stock; retry the outbound order.")
+            new_qty = available_quantity - quantity
             cur.execute(
                 """
-                INSERT INTO forecast_demand_history
-                    (product_id, warehouse_id, demand_date, quantity_sold, source)
-                VALUES (?, ?, ?, ?, 'WMS') AS incoming
-                ON DUPLICATE KEY UPDATE
-                    quantity_sold = quantity_sold + incoming.quantity_sold
+                INSERT INTO movements (product_id, action_type, delta, reason, source)
+                VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')
                 """,
-                (ob.product_id, ob.warehouse_id, dispatch_date, ob.quantity),
+                (
+                    ob.product_id,
+                    -quantity,
+                    f"Outbound to {customer['name']}: {ob.so_ref or 'no ref'}",
+                ),
             )
 
-        new_qty = product["quantity"] - ob.quantity
         cur.execute(
             """
-            INSERT INTO movements (product_id, action_type, delta, reason, source)
-            VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')
+            INSERT INTO forecast_demand_history
+                (product_id, warehouse_id, demand_date, quantity_sold, source)
+            VALUES (?, ?, ?, ?, 'WMS') AS incoming
+            ON DUPLICATE KEY UPDATE
+                quantity_sold = forecast_demand_history.quantity_sold
+                                + incoming.quantity_sold
             """,
-            (
-                ob.product_id,
-                -ob.quantity,
-                f"Outbound to {customer['name']}: {ob.so_ref or 'no ref'}",
-            ),
+            (ob.product_id, ob.warehouse_id, dispatch_date, quantity),
         )
+
         log_audit(
             cur,
             user,
@@ -151,7 +187,7 @@ def create_outbound(
             "outbound",
             "outbound_shipment",
             shipment_id,
-            f"Dispatched {ob.quantity}x '{product['name']}' to {customer['name']} "
+            f"Dispatched {quantity}x '{product['name']}' to {customer['name']} "
             f"({ob.so_ref or 'no ref'})",
         )
         conn.commit()
@@ -161,7 +197,7 @@ def create_outbound(
         resource = dict(row)
         resource["product_name"] = product["name"]
         resource["customer_name"] = customer["name"]
-        resource["quantity_after"] = new_qty
+        resource["quantity_after"] = _display_quantity(new_qty)
     except Exception:
         conn.rollback()
         raise
@@ -208,12 +244,28 @@ def list_outbound(
     rows = cur.execute(
         f"""
         SELECT ob.*, p.name AS product_name, p.sku AS product_sku,
+               p.batch_tracking_enabled_at,
                c.name AS customer_name,
-               w.name AS warehouse_name, w.warehouse_code
+               w.name AS warehouse_name, w.warehouse_code,
+               COALESCE(a.allocated_quantity, 0) AS allocated_quantity,
+               GREATEST(0, ob.quantity-COALESCE(a.allocated_quantity, 0))
+                   AS remaining_to_allocate,
+               CASE
+                   WHEN p.batch_tracking_enabled_at IS NULL THEN 'not_required'
+                   WHEN COALESCE(a.allocated_quantity, 0) > ob.quantity THEN 'overallocated'
+                   WHEN COALESCE(a.allocated_quantity, 0) = ob.quantity THEN 'allocated'
+                   WHEN COALESCE(a.allocated_quantity, 0) > 0 THEN 'partial'
+                   ELSE 'pending'
+               END AS batch_allocation_status
         FROM outbound_shipments ob
         JOIN products p ON p.id = ob.product_id
         JOIN customers c ON c.id = ob.customer_id
         LEFT JOIN warehouses w ON w.id = ob.warehouse_id
+        LEFT JOIN (
+            SELECT outbound_id, SUM(quantity) AS allocated_quantity
+            FROM outbound_batch_allocations
+            GROUP BY outbound_id
+        ) a ON a.outbound_id=ob.id
         {where}
         ORDER BY ob.created_at DESC LIMIT ? OFFSET ?
         """,
@@ -344,7 +396,7 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
                 normalized.get("sku", normalized.get("product_sku"))
             )
             customer_name = _cell_text(normalized.get("customer_name"))
-            quantity = int(normalized.get("quantity") or 0)
+            quantity = _quantity_decimal(normalized.get("quantity"))
             so_ref = _cell_text(normalized.get("so_ref"))
             dispatch_date = _import_date(normalized.get("dispatch_date"), row_num)
             notes = _cell_text(normalized.get("notes"))
@@ -357,16 +409,16 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
             if product_sku:
                 product = cur.execute(
                     """
-                    SELECT id, name, quantity FROM products
-                    WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0
+                    SELECT id, name, quantity, batch_tracking_enabled_at FROM products
+                    WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE
                     """,
                     (product_sku,),
                 ).fetchone()
             elif product_name:
                 product = cur.execute(
                     """
-                    SELECT id, name, quantity FROM products
-                    WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0
+                    SELECT id, name, quantity, batch_tracking_enabled_at FROM products
+                    WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE
                     """,
                     (product_name.lower(),),
                 ).fetchone()
@@ -387,21 +439,22 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
                 errors.append(f"Row {row_num}: Customer '{customer_name}' not found")
                 return
 
-            warehouse_id = None
-            if warehouse_code:
-                warehouse = cur.execute(
-                    """
-                    SELECT id FROM warehouses
-                    WHERE warehouse_code=? AND active=1 AND is_forecast_test=0
-                    """,
-                    (warehouse_code,),
-                ).fetchone()
-                if not warehouse:
-                    errors.append(f"Row {row_num}: Warehouse '{warehouse_code}' not found or inactive")
-                    return
-                warehouse_id = warehouse["id"]
+            if not warehouse_code:
+                errors.append(f"Row {row_num}: warehouse_code is required")
+                return
+            warehouse = cur.execute(
+                """
+                SELECT id FROM warehouses
+                WHERE warehouse_code=? AND active=1 AND is_forecast_test=0
+                """,
+                (warehouse_code,),
+            ).fetchone()
+            if not warehouse:
+                errors.append(f"Row {row_num}: Warehouse '{warehouse_code}' not found or inactive")
+                return
+            warehouse_id = warehouse["id"]
 
-            available = running_qty.get(product["id"], product["quantity"])
+            available = running_qty.get(product["id"], _quantity_decimal(product["quantity"]))
             if quantity > available:
                 errors.append(
                     f"Row {row_num}: Insufficient stock for '{product['name']}' (available: {available})"
@@ -419,35 +472,44 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
                     """,
                     (product["id"], customer["id"], warehouse_id, quantity, so_ref, dispatch_date, notes),
                 )
-
-                if warehouse_id is not None:
-                    cur.execute(
-                        """
-                        INSERT INTO forecast_demand_history
-                            (product_id, warehouse_id, demand_date, quantity_sold, source)
-                        VALUES (?, ?, ?, ?, 'WMS') AS incoming
-                        ON DUPLICATE KEY UPDATE quantity_sold = quantity_sold + incoming.quantity_sold
-                        """,
-                        (product["id"], warehouse_id, dispatch_date, quantity),
-                    )
+                shipment_id = int(cur.lastrowid)
 
                 cur.execute(
                     """
-                    UPDATE products
-                    SET quantity=quantity - ?, updated_at=datetime('now')
-                    WHERE id=? AND is_forecast_test=0 AND quantity >= ?
+                    INSERT INTO forecast_demand_history
+                        (product_id, warehouse_id, demand_date, quantity_sold, source)
+                    VALUES (?, ?, ?, ?, 'WMS') AS incoming
+                    ON DUPLICATE KEY UPDATE
+                        quantity_sold = forecast_demand_history.quantity_sold
+                                        + incoming.quantity_sold
                     """,
-                    (quantity, product["id"], quantity),
+                    (product["id"], warehouse_id, dispatch_date, quantity),
                 )
-                if cur.rowcount != 1:
-                    raise ValueError(
-                        f"Insufficient stock for '{product['name']}' due to a concurrent update"
-                    )
 
-                cur.execute(
-                    "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
-                    (product["id"], -quantity, f"Bulk outbound: {so_ref or 'no ref'}"),
-                )
+                if product["batch_tracking_enabled_at"]:
+                    allocate_outbound_shipment(
+                        cur,
+                        shipment_id,
+                        "AUTO",
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE products
+                        SET quantity=quantity - ?, updated_at=UTC_TIMESTAMP()
+                        WHERE id=? AND is_forecast_test=0 AND quantity >= ?
+                        """,
+                        (quantity, product["id"], quantity),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError(
+                            f"Insufficient stock for '{product['name']}' due to a concurrent update"
+                        )
+
+                    cur.execute(
+                        "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
+                        (product["id"], -quantity, f"Bulk outbound: {so_ref or 'no ref'}"),
+                    )
             except Exception:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                 cur.execute(f"RELEASE SAVEPOINT {savepoint}")

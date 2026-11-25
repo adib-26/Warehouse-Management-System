@@ -1,6 +1,7 @@
 """Time-series model helpers shared by forecast API routes."""
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 import logging
 import math
 import warnings
@@ -142,3 +143,139 @@ def arima_forecast_with_fallback(
 def arima_forecast(sales, forecast_days: int = 14) -> tuple[float, ...]:
     """Convenience wrapper returning clipped predictions with a 7-day fallback."""
     return arima_forecast_with_fallback(sales, forecast_days).predictions
+
+
+def project_stockout(
+    predictions,
+    *,
+    available_stock: float,
+    as_of_date: date,
+    lead_time_days: int,
+    safety_stock: float,
+    replenishments=(),
+    critical_max_days: int = 3,
+    high_max_days: int = 7,
+    warning_max_days: int = 14,
+) -> dict:
+    """Project daily stock balances, first unmet-demand date, and reorder risk.
+
+    A replenishment is available at the start of its arrival date, before that
+    day's forecast demand. Stockout is the first date whose demand exceeds the
+    stock available for that day. Exact depletion at the end of a day therefore
+    becomes stockout only if a later day has positive demand.
+    """
+
+    numeric_stock = float(available_stock)
+    numeric_safety_stock = float(safety_stock)
+    if not math.isfinite(numeric_stock) or numeric_stock < 0:
+        raise ValueError("available_stock must be a finite non-negative number")
+    if not math.isfinite(numeric_safety_stock) or numeric_safety_stock < 0:
+        raise ValueError("safety_stock must be a finite non-negative number")
+    if lead_time_days < 0:
+        raise ValueError("lead_time_days must be non-negative")
+    if not 0 <= critical_max_days < high_max_days < warning_max_days:
+        raise ValueError("Risk thresholds must increase: critical < high < warning")
+
+    daily = []
+    previous_date = None
+    for item in predictions:
+        raw_date = item["date"]
+        forecast_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+        demand = float(item.get("predicted_demand", item.get("demand")))
+        if not math.isfinite(demand) or demand < 0:
+            raise ValueError("Predicted demand must be finite and non-negative")
+        if previous_date is not None and forecast_date != previous_date + timedelta(days=1):
+            raise ValueError("Forecast dates must be consecutive and unique")
+        daily.append({"date": forecast_date, "demand": demand})
+        previous_date = forecast_date
+    if not daily:
+        raise ValueError("At least one daily prediction is required")
+
+    receipts_by_date = {}
+    for receipt in replenishments:
+        raw_date = receipt["arrival_date"]
+        arrival_date = raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+        quantity = float(receipt["quantity"])
+        if not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("Replenishment quantity must be finite and positive")
+        receipts_by_date[arrival_date] = receipts_by_date.get(arrival_date, 0.0) + quantity
+
+    lead_time_demand = sum(
+        item["demand"] for item in daily[:lead_time_days]
+    )
+    lead_time_covered = lead_time_days <= len(daily)
+    reorder_point = lead_time_demand + numeric_safety_stock if lead_time_covered else None
+    lead_time_end = as_of_date + timedelta(days=lead_time_days)
+    lead_time_receipts = sum(
+        quantity
+        for arrival_date, quantity in receipts_by_date.items()
+        if as_of_date < arrival_date <= lead_time_end
+    )
+    inventory_position = numeric_stock + lead_time_receipts
+    reorder_required = (
+        inventory_position <= reorder_point if reorder_point is not None else None
+    )
+
+    stock = numeric_stock
+    stockout_date = as_of_date if stock <= 0 else None
+    unmet_demand_total = 0.0
+    daily_projection = []
+    total_demand = 0.0
+    for item in daily:
+        forecast_date = item["date"]
+        demand = item["demand"]
+        received = receipts_by_date.get(forecast_date, 0.0)
+        opening_stock = stock + received
+        unmet = max(0.0, demand - opening_stock)
+        if stockout_date is None and unmet > 0:
+            stockout_date = forecast_date
+        ending_stock = max(0.0, opening_stock - demand)
+        stock = ending_stock
+        unmet_demand_total += unmet
+        total_demand += demand
+        daily_projection.append(
+            {
+                "date": forecast_date.isoformat(),
+                "predicted_demand": round(demand, 2),
+                "opening_stock": round(opening_stock, 2),
+                "replenishment_received": round(received, 2),
+                "unmet_demand": round(unmet, 2),
+                "ending_stock": round(ending_stock, 2),
+            }
+        )
+
+    days_remaining = (
+        max(0, (stockout_date - as_of_date).days)
+        if stockout_date is not None
+        else None
+    )
+    if days_remaining is None:
+        risk = "healthy" if len(daily) > warning_max_days else "unrated"
+    elif days_remaining <= critical_max_days:
+        risk = "critical"
+    elif days_remaining <= high_max_days:
+        risk = "high"
+    elif days_remaining <= warning_max_days:
+        risk = "warning"
+    else:
+        risk = "healthy"
+
+    return {
+        "available_stock": round(numeric_stock, 2),
+        "lead_time_days": int(lead_time_days),
+        "safety_stock": round(numeric_safety_stock, 2),
+        "average_daily_demand": round(total_demand / len(daily), 2),
+        "forecast_lead_time_demand": round(lead_time_demand, 2),
+        "reorder_point": round(reorder_point, 2) if reorder_point is not None else None,
+        "incoming_by_lead_time": round(lead_time_receipts, 2),
+        "inventory_position": round(inventory_position, 2),
+        "reorder_required": reorder_required,
+        "lead_time_covered": lead_time_covered,
+        "stockout_date": stockout_date.isoformat() if stockout_date else None,
+        "days_remaining": days_remaining,
+        "risk": risk,
+        "forecast_horizon_days": len(daily),
+        "ending_stock": round(stock, 2),
+        "unmet_demand_total": round(unmet_demand_total, 2),
+        "daily_projection": daily_projection,
+    }

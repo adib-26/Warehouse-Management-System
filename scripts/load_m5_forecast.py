@@ -8,8 +8,10 @@ import argparse
 import csv
 import gzip
 import hashlib
+import io
 import json
 import sys
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -22,17 +24,84 @@ MAX_SIGNED_INT = 2_147_483_647
 MAX_DAILY_SALES = 9_999_999_999
 HASH_CHUNK_BYTES = 1024 * 1024
 MAPPING_BATCH_SIZE = 1_000
-DELETE_MAPPING_BATCH_SIZE = 100
 IMPORT_LOCK_NAME = "novaledger_m5_forecast_import"
+STAGE_TABLE = "tmp_m5_forecast_stage"
+STAGE_SCOPE_TABLE = "tmp_m5_forecast_stage_scope"
+VALIDATION_PROGRESS_ROWS = 1_000_000
+STAGING_PROGRESS_ROWS = 100_000
 
+sys.path.insert(0, str(ROOT / "scripts"))
+from project_env import load_project_env  # noqa: E402
+
+load_project_env(ROOT)
 sys.path.insert(0, str(ROOT / "backend"))
 from database import get_db  # noqa: E402
 
 
-def open_csv(path: Path):
-    if path.name.lower().endswith(".gz"):
-        return gzip.open(path, "rt", encoding="utf-8-sig", newline="")
-    return path.open("r", encoding="utf-8-sig", newline="")
+class DigestingReader(io.RawIOBase):
+    """A raw reader that computes a checksum as the CSV reader consumes bytes."""
+
+    def __init__(self, raw_file):
+        self._raw_file = raw_file
+        self._digest = hashlib.sha256()
+        self.byte_count = 0
+        super().__init__()
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        read_count = self._raw_file.readinto(buffer)
+        if read_count:
+            chunk = memoryview(buffer)[:read_count]
+            self._digest.update(chunk)
+            self.byte_count += read_count
+        return read_count
+
+    @property
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+    def close(self):
+        if not self.closed:
+            self._raw_file.close()
+        super().close()
+
+
+@contextmanager
+def open_csv_with_digest(path: Path):
+    """Open a CSV while hashing exactly the bytes consumed from its source file.
+
+    The manifest hashes the compressed artifact, rather than its decompressed
+    text. Wrapping the underlying binary stream lets preflight validation and
+    checksum verification share one pass even for ``.csv.gz`` inputs.
+    """
+
+    raw_file = path.open("rb", buffering=0)
+    digesting_file = DigestingReader(raw_file)
+    buffered_file = io.BufferedReader(digesting_file, buffer_size=HASH_CHUNK_BYTES)
+    binary_file = (
+        gzip.GzipFile(fileobj=buffered_file, mode="rb")
+        if path.name.lower().endswith(".gz")
+        else buffered_file
+    )
+    text_file = io.TextIOWrapper(binary_file, encoding="utf-8-sig", newline="")
+    try:
+        yield text_file, digesting_file
+    finally:
+        # GzipFile deliberately leaves a caller-provided file object open. Close
+        # the buffer too so the original descriptor is always released.
+        try:
+            text_file.close()
+        finally:
+            buffered_file.close()
+
+
+def input_snapshot(path: Path) -> tuple[int, int, int, int]:
+    """Return a stable-enough identity check for an input file during streaming."""
+
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def sha256_file(path: Path) -> str:
@@ -200,11 +269,19 @@ def validate_input(
     path: Path,
     mappings: dict[tuple[str, str], tuple[int, int]],
     allow_unmapped: bool,
+    stage_writer=None,
 ) -> dict:
-    """Validate every source series and retain summary for mapped series only."""
+    """Validate every source series and optionally stage mapped rows once.
+
+    The source is intentionally checked in full, including unmapped series, so
+    a sparse import cannot hide a corrupt conversion.  When a stage writer is
+    supplied, only mapped rows are retained and the later database activation
+    never has to reread the full source artifact.
+    """
     if not path.is_file():
         raise FileNotFoundError(f"Missing processed M5 CSV: {path}")
 
+    starting_snapshot = input_snapshot(path)
     source_series = None
     source_selected = False
     source_dates = []
@@ -212,10 +289,12 @@ def validate_input(
     all_reference_dates = None
     seen_source_series = set()
     selected_series = set()
+    selected_store_ids = set()
     source_row_count = 0
     selected_row_count = 0
     skipped_row_count = 0
     skipped_series_count = 0
+    next_progress_row = VALIDATION_PROGRESS_ROWS
 
     def finish_series(key, dates, reference):
         if key is None:
@@ -231,7 +310,7 @@ def validate_input(
             )
         return reference
 
-    with open_csv(path) as source_file:
+    with open_csv_with_digest(path) as (source_file, digesting_file):
         reader = csv.reader(source_file, strict=True)
         headers = next(reader, None)
         if headers != list(OUTPUT_COLUMNS):
@@ -264,6 +343,7 @@ def validate_input(
                     raise ValueError(f"No product/warehouse mapping for M5 series {key}")
                 if source_selected:
                     selected_series.add(key)
+                    selected_store_ids.add(store_id)
                 else:
                     skipped_series_count += 1
                 source_dates = []
@@ -277,16 +357,33 @@ def validate_input(
                 )
             previous_date = sale_date
             source_dates.append(sale_date_text)
-            parse_daily_sales(quantity_text, row_number)
+            quantity = parse_daily_sales(quantity_text, row_number)
             source_row_count += 1
             if source_selected:
                 selected_row_count += 1
+                if stage_writer is not None:
+                    stage_writer.add(item_id, store_id, sale_date_text, quantity)
             else:
                 skipped_row_count += 1
+
+            if source_row_count >= next_progress_row:
+                print(
+                    f"Verified {source_row_count:,} source rows; selected "
+                    f"{selected_row_count:,} and skipped {skipped_row_count:,}.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                while source_row_count >= next_progress_row:
+                    next_progress_row += VALIDATION_PROGRESS_ROWS
 
     all_reference_dates = finish_series(
         source_series, source_dates, all_reference_dates
     )
+    ending_snapshot = input_snapshot(path)
+    if ending_snapshot != starting_snapshot:
+        raise ValueError("Processed M5 input changed during validation")
+    if digesting_file.byte_count != starting_snapshot[2]:
+        raise ValueError("Could not checksum every byte of the processed M5 input")
     if not source_row_count or not selected_series or not all_reference_dates:
         raise ValueError("Processed M5 CSV contains no mapped daily sales rows")
     unused_mappings = set(mappings) - selected_series
@@ -295,10 +392,17 @@ def validate_input(
         raise ValueError(
             f"Mapping CSV contains series absent from the input, including {preview}"
         )
+    if stage_writer is not None:
+        stage_writer.flush()
+        if stage_writer.row_count != selected_row_count:
+            raise RuntimeError(
+                "Selected-row staging count does not match validated M5 input"
+            )
 
     return {
         "source_series_count": len(seen_source_series),
         "selected_series_count": len(selected_series),
+        "selected_store_count": len(selected_store_ids),
         "skipped_series_count": skipped_series_count,
         "source_row_count": source_row_count,
         "selected_row_count": selected_row_count,
@@ -307,6 +411,7 @@ def validate_input(
         "date_end": all_reference_dates[-1],
         "date_count": len(all_reference_dates),
         "selected_keys": selected_series,
+        "dataset_sha256": digesting_file.hexdigest,
     }
 
 
@@ -323,59 +428,73 @@ def _require_forecast_schema(cur):
         cur.execute("SELECT id FROM forecast_m5_imports LIMIT 0")
     except Exception as exc:
         raise RuntimeError(
-            "Forecast schema version 5 is required. Start the NovaLedger backend "
+            "The NovaLedger forecast-import schema is required. Start the backend "
             "once to apply migrations before importing M5 data."
         ) from exc
 
 
+def _validate_mapping_targets(cur, mappings: dict) -> None:
+    """Require every requested target to be an active, isolated test target."""
+
+    product_ids = sorted({product_id for product_id, _ in mappings.values()})
+    warehouse_ids = sorted({warehouse_id for _, warehouse_id in mappings.values()})
+    active_products = set()
+    for batch in _ids_in_batches(product_ids, 5_000):
+        placeholders = ", ".join(["?"] * len(batch))
+        active_products.update(
+            int(row["id"])
+            for row in cur.execute(
+                f"""
+                SELECT id FROM products
+                WHERE id IN ({placeholders})
+                  AND deleted=0 AND archived=0 AND is_forecast_test=1
+                """,
+                batch,
+            ).fetchall()
+        )
+    active_warehouses = set()
+    for batch in _ids_in_batches(warehouse_ids, 5_000):
+        placeholders = ", ".join(["?"] * len(batch))
+        active_warehouses.update(
+            int(row["id"])
+            for row in cur.execute(
+                f"""
+                SELECT id FROM warehouses
+                WHERE id IN ({placeholders})
+                  AND active=1 AND is_forecast_test=1
+                """,
+                batch,
+            ).fetchall()
+        )
+    missing_products = sorted(set(product_ids) - active_products)
+    missing_warehouses = sorted(set(warehouse_ids) - active_warehouses)
+    if missing_products:
+        raise ValueError(
+            "Mappings must use active M5 test product IDs; invalid IDs: "
+            + ", ".join(map(str, missing_products[:10]))
+        )
+    if missing_warehouses:
+        raise ValueError(
+            "Mappings must use active M5 test warehouse IDs; invalid IDs: "
+            + ", ".join(map(str, missing_warehouses[:10]))
+        )
+
+
+def validate_database_mapping_targets(conn, mappings: dict) -> None:
+    """Fail before an expensive source scan when mapping targets are unsafe."""
+
+    cur = conn.cursor()
+    _require_forecast_schema(cur)
+    _validate_mapping_targets(cur, mappings)
+
+
 def ensure_database_mappings(conn, mappings: dict) -> dict:
-    """Verify sandbox targets and materialize immutable source mappings."""
+    """Materialize only the selected immutable source mappings."""
+
     cur = conn.cursor()
     try:
         _require_forecast_schema(cur)
-        product_ids = sorted({product_id for product_id, _ in mappings.values()})
-        warehouse_ids = sorted({warehouse_id for _, warehouse_id in mappings.values()})
-        active_products = set()
-        for batch in _ids_in_batches(product_ids, 5_000):
-            placeholders = ", ".join(["?"] * len(batch))
-            active_products.update(
-                int(row["id"])
-                for row in cur.execute(
-                    f"""
-                    SELECT id FROM products
-                    WHERE id IN ({placeholders})
-                      AND deleted=0 AND archived=0 AND is_forecast_test=1
-                    """,
-                    batch,
-                ).fetchall()
-            )
-        active_warehouses = set()
-        for batch in _ids_in_batches(warehouse_ids, 5_000):
-            placeholders = ", ".join(["?"] * len(batch))
-            active_warehouses.update(
-                int(row["id"])
-                for row in cur.execute(
-                    f"""
-                    SELECT id FROM warehouses
-                    WHERE id IN ({placeholders})
-                      AND active=1 AND is_forecast_test=1
-                    """,
-                    batch,
-                ).fetchall()
-            )
-        missing_products = sorted(set(product_ids) - active_products)
-        missing_warehouses = sorted(set(warehouse_ids) - active_warehouses)
-        if missing_products:
-            raise ValueError(
-                "Mappings must use active M5 test product IDs; invalid IDs: "
-                + ", ".join(map(str, missing_products[:10]))
-            )
-        if missing_warehouses:
-            raise ValueError(
-                "Mappings must use active M5 test warehouse IDs; invalid IDs: "
-                + ", ".join(map(str, missing_warehouses[:10]))
-            )
-
+        _validate_mapping_targets(cur, mappings)
         rows = [
             (item_id, store_id, product_id, warehouse_id)
             for (item_id, store_id), (product_id, warehouse_id) in mappings.items()
@@ -391,17 +510,22 @@ def ensure_database_mappings(conn, mappings: dict) -> dict:
                 batch,
             )
 
-        database_mappings = {
-            (row["item_id"], row["store_id"]): (
-                int(row["id"]),
-                int(row["product_id"]),
-                int(row["warehouse_id"]),
-            )
-            for row in cur.execute(
+        database_mappings = {}
+        for batch in _ids_in_batches(mappings.keys(), MAPPING_BATCH_SIZE // 2):
+            pair_placeholders = ", ".join(["(?, ?)"] * len(batch))
+            batch_params = [value for key in batch for value in key]
+            rows = cur.execute(
                 "SELECT id, item_id, store_id, product_id, warehouse_id "
-                "FROM forecast_m5_mappings"
+                "FROM forecast_m5_mappings "
+                f"WHERE (item_id, store_id) IN ({pair_placeholders})",
+                batch_params,
             ).fetchall()
-        }
+            for row in rows:
+                database_mappings[(row["item_id"], row["store_id"])] = (
+                    int(row["id"]),
+                    int(row["product_id"]),
+                    int(row["warehouse_id"]),
+                )
         resolved = {}
         for key, expected_target in mappings.items():
             actual = database_mappings.get(key)
@@ -436,6 +560,127 @@ def release_import_lock(conn):
     except Exception:
         # The MySQL connection close also releases a named connection lock.
         pass
+
+
+def reconcile_abandoned_imports(conn) -> int:
+    """Close audit rows left running when an earlier importer lost its connection."""
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE forecast_m5_imports
+        SET status='failed',
+            completed_at=UTC_TIMESTAMP(),
+            error_message=COALESCE(
+                error_message,
+                'Importer connection ended before the import could complete.'
+            )
+        WHERE status='running'
+        """
+    )
+    recovered = cur.rowcount
+    conn.commit()
+    return recovered
+
+
+def create_import_stage(conn, batch_size: int):
+    """Create connection-local storage for validated mapped rows.
+
+    Staging is deliberately temporary: it is invisible to forecast readers,
+    discarded if this connection dies, and lets replacement become one atomic
+    activation instead of a sequence of partially committed upserts.
+    """
+
+    cur = conn.cursor()
+    cur.execute(f"DROP TEMPORARY TABLE IF EXISTS `{STAGE_SCOPE_TABLE}`")
+    cur.execute(f"DROP TEMPORARY TABLE IF EXISTS `{STAGE_TABLE}`")
+    cur.execute(
+        f"""
+        CREATE TEMPORARY TABLE `{STAGE_TABLE}` (
+            item_id VARCHAR(64) NOT NULL,
+            store_id VARCHAR(32) NOT NULL,
+            demand_date DATE NOT NULL,
+            quantity_sold DECIMAL(12,2) NOT NULL,
+            PRIMARY KEY (item_id, store_id, demand_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TEMPORARY TABLE `{STAGE_SCOPE_TABLE}` (
+            item_id VARCHAR(64) NOT NULL,
+            store_id VARCHAR(32) NOT NULL,
+            PRIMARY KEY (item_id, store_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    conn.commit()
+    return ImportStageWriter(conn, batch_size)
+
+
+class ImportStageWriter:
+    """Batch selected input rows into the private staging table."""
+
+    def __init__(self, conn, batch_size: int):
+        self.conn = conn
+        self.batch_size = batch_size
+        self._pending = []
+        self.row_count = 0
+        self._next_progress_row = STAGING_PROGRESS_ROWS
+
+    def add(self, item_id: str, store_id: str, demand_date: str, quantity_sold: int):
+        self._pending.append((item_id, store_id, demand_date, quantity_sold))
+        if len(self._pending) >= self.batch_size:
+            self.flush()
+
+    def flush(self):
+        if not self._pending:
+            return
+        cur = self.conn.cursor()
+        cur.executemany(
+            f"""
+            INSERT INTO `{STAGE_TABLE}`
+                (item_id, store_id, demand_date, quantity_sold)
+            VALUES (?, ?, ?, ?)
+            """,
+            self._pending,
+        )
+        staged_now = len(self._pending)
+        self.conn.commit()
+        self.row_count += staged_now
+        self._pending.clear()
+        while self.row_count >= self._next_progress_row:
+            print(
+                f"Staged {self._next_progress_row:,} selected M5 daily rows.",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._next_progress_row += STAGING_PROGRESS_ROWS
+
+    def prepare_scope(self, expected_rows: int, expected_series: int):
+        self.flush()
+        cur = self.conn.cursor()
+        row = cur.execute(
+            f"SELECT COUNT(*) AS n FROM `{STAGE_TABLE}`"
+        ).fetchone()
+        if row is None or int(row["n"]) != expected_rows:
+            raise RuntimeError(
+                "Temporary M5 staging table does not contain every validated row"
+            )
+        cur.execute(
+            f"""
+            INSERT INTO `{STAGE_SCOPE_TABLE}` (item_id, store_id)
+            SELECT DISTINCT item_id, store_id FROM `{STAGE_TABLE}`
+            """
+        )
+        row = cur.execute(
+            f"SELECT COUNT(*) AS n FROM `{STAGE_SCOPE_TABLE}`"
+        ).fetchone()
+        if row is None or int(row["n"]) != expected_series:
+            raise RuntimeError(
+                "Temporary M5 staging scope does not match validated source series"
+            )
+        self.conn.commit()
 
 
 def count_existing_history(cur, mapping_ids) -> int:
@@ -515,100 +760,136 @@ def finish_import_run(conn, run_id: int, status: str, loaded_rows: int, error: s
         """
         UPDATE forecast_m5_imports
         SET status=?, loaded_row_count=?, completed_at=UTC_TIMESTAMP(), error_message=?
-        WHERE id=?
+        WHERE id=? AND status='running'
         """,
         (status, loaded_rows, error, run_id),
     )
     conn.commit()
 
 
-def delete_stale_history_after_replace(
-    conn, mapping_ids, date_start: str, date_end: str
+def activate_staged_history(
+    conn,
+    run_id: int,
+    expected_rows: int,
+    date_start: str,
+    date_end: str,
+    replace_existing: bool,
 ) -> int:
-    """Prune only obsolete dates after all replacement rows were written safely."""
-    deleted_rows = 0
+    """Atomically publish staged rows and, when requested, prune stale history."""
+
     cur = conn.cursor()
-    for batch in _ids_in_batches(mapping_ids, DELETE_MAPPING_BATCH_SIZE):
-        placeholders = ", ".join(["?"] * len(batch))
+    staged = cur.execute(
+        f"SELECT COUNT(*) AS n FROM `{STAGE_TABLE}`"
+    ).fetchone()
+    if staged is None or int(staged["n"]) != expected_rows:
+        raise RuntimeError("Temporary M5 staging row count changed before activation")
+
+    cur.execute("START TRANSACTION")
+    try:
         cur.execute(
             f"""
-            DELETE FROM forecast_demand_history
-            WHERE source='M5'
-              AND m5_mapping_id IN ({placeholders})
-              AND (demand_date < ? OR demand_date > ?)
-            """,
-            batch + [date_start, date_end],
+            INSERT INTO forecast_demand_history
+                (product_id, warehouse_id, demand_date, quantity_sold, source, m5_mapping_id)
+            SELECT mapping.product_id,
+                   mapping.warehouse_id,
+                   stage.demand_date,
+                   stage.quantity_sold,
+                   'M5',
+                   mapping.id
+            FROM `{STAGE_TABLE}` AS stage
+            JOIN forecast_m5_mappings AS mapping
+              ON mapping.item_id=stage.item_id AND mapping.store_id=stage.store_id
+            ON DUPLICATE KEY UPDATE
+                quantity_sold=VALUES(quantity_sold),
+                m5_mapping_id=VALUES(m5_mapping_id)
+            """
         )
-        deleted_rows += cur.rowcount
-        conn.commit()
-    return deleted_rows
+        mismatch = cur.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM `{STAGE_TABLE}` AS stage
+            JOIN forecast_m5_mappings AS mapping
+              ON mapping.item_id=stage.item_id AND mapping.store_id=stage.store_id
+            LEFT JOIN forecast_demand_history AS history
+              ON history.source='M5'
+             AND history.m5_mapping_id=mapping.id
+             AND history.product_id=mapping.product_id
+             AND history.warehouse_id=mapping.warehouse_id
+             AND history.demand_date=stage.demand_date
+            WHERE history.id IS NULL OR history.quantity_sold <> stage.quantity_sold
+            """
+        ).fetchone()
+        if mismatch is None or int(mismatch["n"]) != 0:
+            raise RuntimeError("M5 history verification failed before replacement activation")
 
-
-def import_rows(
-    conn,
-    path: Path,
-    mappings: dict,
-    expected_rows: int,
-    batch_size: int,
-) -> int:
-    cur = conn.cursor()
-    insert_sql = """
-        INSERT INTO forecast_demand_history
-            (product_id, warehouse_id, demand_date, quantity_sold, source, m5_mapping_id)
-        VALUES (?, ?, ?, ?, 'M5', ?) AS incoming
-        ON DUPLICATE KEY UPDATE
-            quantity_sold = incoming.quantity_sold,
-            m5_mapping_id = incoming.m5_mapping_id
-    """
-    batch = []
-    loaded_rows = 0
-
-    try:
-        with open_csv(path) as source_file:
-            reader = csv.reader(source_file, strict=True)
-            if next(reader, None) != list(OUTPUT_COLUMNS):
-                raise ValueError("Processed M5 CSV header changed after validation")
-            for row_number, row in enumerate(reader, start=2):
-                if len(row) != len(OUTPUT_COLUMNS):
-                    raise ValueError(f"Malformed processed M5 row {row_number}")
-                item_id, store_id, date_text, quantity_text = row
-                mapping = mappings.get((item_id, store_id))
-                if mapping is None:
-                    continue
-                mapping_id, product_id, warehouse_id = mapping
-                batch.append(
-                    (
-                        product_id,
-                        warehouse_id,
-                        parse_date(date_text, row_number),
-                        parse_daily_sales(quantity_text, row_number),
-                        mapping_id,
-                    )
-                )
-                if len(batch) >= batch_size:
-                    cur.executemany(insert_sql, batch)
-                    conn.commit()
-                    loaded_rows += len(batch)
-                    batch.clear()
-                    if loaded_rows % 100_000 == 0:
-                        print(
-                            f"Loaded {loaded_rows:,} of {expected_rows:,} M5 daily rows",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-        if batch:
-            cur.executemany(insert_sql, batch)
-            conn.commit()
-            loaded_rows += len(batch)
-        if loaded_rows != expected_rows:
-            raise ValueError(
-                f"Input changed during import: expected {expected_rows:,} rows, "
-                f"loaded {loaded_rows:,}"
+        deleted_rows = 0
+        if replace_existing:
+            cur.execute(
+                f"""
+                DELETE history
+                FROM forecast_demand_history AS history
+                JOIN forecast_m5_mappings AS mapping
+                  ON mapping.id=history.m5_mapping_id
+                JOIN `{STAGE_SCOPE_TABLE}` AS scope
+                  ON scope.item_id=mapping.item_id AND scope.store_id=mapping.store_id
+                WHERE history.source='M5'
+                  AND (history.demand_date < ? OR history.demand_date > ?)
+                """,
+                (date_start, date_end),
             )
+            deleted_rows = cur.rowcount
+
+        active_rows = cur.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM forecast_demand_history AS history
+            JOIN forecast_m5_mappings AS mapping
+              ON mapping.id=history.m5_mapping_id
+            JOIN `{STAGE_SCOPE_TABLE}` AS scope
+              ON scope.item_id=mapping.item_id AND scope.store_id=mapping.store_id
+            WHERE history.source='M5'
+              AND history.demand_date >= ? AND history.demand_date <= ?
+            """,
+            (date_start, date_end),
+        ).fetchone()
+        if active_rows is None or int(active_rows["n"]) != expected_rows:
+            raise RuntimeError(
+                "Published M5 history count does not match the validated source"
+            )
+
+        if replace_existing:
+            stale_rows = cur.execute(
+                f"""
+                SELECT COUNT(*) AS n
+                FROM forecast_demand_history AS history
+                JOIN forecast_m5_mappings AS mapping
+                  ON mapping.id=history.m5_mapping_id
+                JOIN `{STAGE_SCOPE_TABLE}` AS scope
+                  ON scope.item_id=mapping.item_id AND scope.store_id=mapping.store_id
+                WHERE history.source='M5'
+                  AND (history.demand_date < ? OR history.demand_date > ?)
+                """,
+                (date_start, date_end),
+            ).fetchone()
+            if stale_rows is None or int(stale_rows["n"]) != 0:
+                raise RuntimeError("Stale M5 history remains after replacement activation")
+
+        cur.execute(
+            """
+            UPDATE forecast_m5_imports
+            SET status='success', loaded_row_count=?, completed_at=UTC_TIMESTAMP(),
+                error_message=NULL
+            WHERE id=? AND status='running'
+            """,
+            (expected_rows, run_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("Could not finalize the M5 import audit record")
+        conn.commit()
+        return deleted_rows
     except Exception:
         conn.rollback()
         raise
-    return loaded_rows
 
 
 def main() -> int:
@@ -646,7 +927,7 @@ def main() -> int:
         "--batch-size",
         type=int,
         default=5_000,
-        help="Rows per committed upsert batch (1-10000, default 5000)",
+        help="Rows per committed private staging batch (1-10000, default 5000)",
     )
     args = parser.parse_args()
     if not 1 <= args.batch_size <= 10_000:
@@ -660,44 +941,81 @@ def main() -> int:
     loaded_rows = 0
     try:
         mappings = load_mapping_file(args.mapping)
-        dataset_digest = sha256_file(args.input)
         manifest_path = None if args.skip_manifest_check else (args.manifest or default_metadata_path(args.input))
+        conn = get_db()
+        if args.allow_unmapped:
+            # Mapping rows absent from the source are allowed, so validate the
+            # schema now and check only source-selected targets after scanning.
+            _require_forecast_schema(conn.cursor())
+        else:
+            # Reject unsafe targets before opening and validating a potentially
+            # multi-gigabyte source file. Repeat this check under the import
+            # lock before committing mappings or forecast history.
+            validate_database_mapping_targets(conn, mappings)
+        stage_writer = create_import_stage(conn, args.batch_size)
+        summary = validate_input(
+            args.input,
+            mappings,
+            args.allow_unmapped,
+            stage_writer=stage_writer,
+        )
+        dataset_digest = summary["dataset_sha256"]
         manifest = (
             None
             if manifest_path is None
             else validate_manifest(manifest_path, args.input, dataset_digest)
         )
-        summary = validate_input(args.input, mappings, args.allow_unmapped)
         if manifest is not None:
             coverage = manifest["coverage"]
             if coverage["row_count"] != summary["source_row_count"]:
                 raise ValueError("Dataset manifest row count does not match the M5 input")
-            if coverage.get("date_start") != summary["date_start"] or coverage.get("date_end") != summary["date_end"]:
-                raise ValueError("Dataset manifest date coverage does not match the M5 input")
-        if sha256_file(args.input) != dataset_digest:
-            raise ValueError("Processed M5 input changed during preflight validation")
+            if (
+                coverage.get("date_start") != summary["date_start"]
+                or coverage.get("date_end") != summary["date_end"]
+            ):
+                raise ValueError(
+                    "Dataset manifest date coverage does not match the M5 input"
+                )
 
         selected_mappings = {key: mappings[key] for key in summary["selected_keys"]}
         selected_mapping_digest = mapping_sha256(selected_mappings)
+        stage_writer.prepare_scope(
+            summary["selected_row_count"], summary["selected_series_count"]
+        )
+        # Staging is connection-private and safe to perform while forecasts are
+        # running. Hold the shared import lock only for durable mapping/history
+        # changes so a full-source validation does not unnecessarily block reads.
+        acquire_import_lock(conn)
+        lock_acquired = True
+        if args.allow_unmapped:
+            # An allow-unmapped mapping file may intentionally contain targets
+            # absent from this source. Validate only the selected subset later.
+            _require_forecast_schema(conn.cursor())
+        else:
+            validate_database_mapping_targets(conn, mappings)
+        recovered_runs = reconcile_abandoned_imports(conn)
+        if recovered_runs:
+            print(
+                f"Marked {recovered_runs:,} abandoned M5 import audit run(s) as failed.",
+                file=sys.stderr,
+            )
         print(
-            f"Validated {summary['selected_row_count']:,} mapped rows across "
-            f"{summary['selected_series_count']:,} series from {summary['date_start']} "
+            f"Validated {summary['selected_row_count']:,} selected rows across "
+            f"{summary['selected_series_count']:,} series in "
+            f"{summary['selected_store_count']:,} stores from {summary['date_start']} "
             f"through {summary['date_end']}",
             file=sys.stderr,
         )
         if summary["skipped_series_count"]:
             print(
-                f"Skipping {summary['skipped_row_count']:,} rows in "
+                f"Verified and skipped {summary['skipped_row_count']:,} rows in "
                 f"{summary['skipped_series_count']:,} unmapped series.",
                 file=sys.stderr,
             )
 
-        conn = get_db()
-        acquire_import_lock(conn)
-        lock_acquired = True
         resolved_mappings = ensure_database_mappings(conn, selected_mappings)
-        if sha256_file(args.input) != dataset_digest:
-            raise ValueError("Processed M5 input changed before import")
+        if set(resolved_mappings) != summary["selected_keys"]:
+            raise RuntimeError("Resolved M5 mappings do not match the staged source scope")
 
         cur = conn.cursor()
         existing_rows = count_existing_history(
@@ -721,32 +1039,25 @@ def main() -> int:
             summary,
             args.replace,
         )
-        if sha256_file(args.input) != dataset_digest:
-            raise ValueError("Processed M5 input changed before write")
-        loaded_rows = import_rows(
-            conn,
-            args.input,
-            resolved_mappings,
-            summary["selected_row_count"],
-            args.batch_size,
+        print(
+            "Validated rows are staged; atomically publishing the selected M5 forecast history.",
+            file=sys.stderr,
+            flush=True,
         )
-        if sha256_file(args.input) != dataset_digest:
-            raise ValueError(
-                "Processed M5 input changed during import; rerun with --replace using a stable input"
+        deleted_rows = activate_staged_history(
+            conn,
+            run_id,
+            summary["selected_row_count"],
+            summary["date_start"],
+            summary["date_end"],
+            args.replace,
+        )
+        loaded_rows = summary["selected_row_count"]
+        if deleted_rows:
+            print(
+                f"Pruned {deleted_rows:,} obsolete M5 rows outside the replacement coverage.",
+                file=sys.stderr,
             )
-        if args.replace:
-            deleted_rows = delete_stale_history_after_replace(
-                conn,
-                [mapping[0] for mapping in resolved_mappings.values()],
-                summary["date_start"],
-                summary["date_end"],
-            )
-            if deleted_rows:
-                print(
-                    f"Pruned {deleted_rows:,} obsolete M5 rows outside the replacement coverage.",
-                    file=sys.stderr,
-                )
-        finish_import_run(conn, run_id, "success", loaded_rows)
         print(
             f"Imported {loaded_rows:,} M5 demand rows in run #{run_id}. Product quantities, "
             "outbound shipments, and stock movements were not modified."

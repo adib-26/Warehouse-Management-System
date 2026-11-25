@@ -1,6 +1,11 @@
 import { useEffect, useState, useRef } from "react";
 import { authFetch, downloadAttachment as apiDownloadAttachment } from "../api";
 import { useAuth } from "../AuthContext";
+import Dialog from "../components/Dialog";
+import BalanceStrip from "../components/BalanceStrip";
+import { useConfirm } from "../components/FeedbackProvider";
+import { formatPlainDate, formatQuantity, responseErrorMessage } from "../format";
+import PageHeader from "../components/PageHeader";
 
 function localDate() {
   const now = new Date();
@@ -8,23 +13,9 @@ function localDate() {
   return local.toISOString().slice(0, 10);
 }
 
-function Dialog({ open, onClose, title, children }) {
-  if (!open) return null;
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div className="dialog-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 640 }}>
-        <div className="dialog-header">
-          <h2 className="dialog-title">{title}</h2>
-          <button onClick={onClose} className="btn btn-ghost btn-xs" style={{ padding: "4px 8px", fontSize: 18 }}>&times;</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 export default function Inbound() {
   const { can } = useAuth();
+  const confirm = useConfirm();
   const [products, setProducts] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [shipments, setShipments] = useState([]);
@@ -88,9 +79,15 @@ export default function Inbound() {
       formData.append("file", file);
       const res = await authFetch(`/inbound-shipments/imports`, { method: "POST", body: formData });
       const data = await res.json();
+      if (!res.ok) {
+        setMessage({ type: "error", text: responseErrorMessage(data, "Could not import the inbound file.") });
+        return;
+      }
+      const rowErrors = Array.isArray(data.errors) ? data.errors : [];
+      const totalErrors = Number(data.total_errors) || rowErrors.length;
       setMessage({
-        type: "success",
-        text: `Imported ${data.imported} inbound records.${data.total_errors > 0 ? ` ${data.total_errors} errors.` : ""}`,
+        type: totalErrors > 0 ? "warning" : "success",
+        text: `Imported ${data.imported} inbound records.${totalErrors > 0 ? ` ${totalErrors} row${totalErrors === 1 ? " was" : "s were"} rejected: ${rowErrors.join("; ") || "see the source file and correct the required values."}` : ""}`,
       });
       loadData();
     } catch {
@@ -99,6 +96,13 @@ export default function Inbound() {
       setUploading(false);
       setUploadFile(null);
     }
+  };
+
+  const selectBulkFile = (event) => {
+    const file = event.currentTarget.files?.[0];
+    // Let an operator correct and choose the same file again after a validation error.
+    event.currentTarget.value = "";
+    handleBulkUpload(file);
   };
 
   const handleDrop = (e) => {
@@ -144,7 +148,13 @@ export default function Inbound() {
   };
 
   const deleteAttachment = async (id) => {
-    if (!confirm("Delete this attachment?")) return;
+    const ok = await confirm({
+      title: "Remove attachment",
+      message: "Remove this attachment? This cannot be undone.",
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
+    if (!ok) return;
     await authFetch(`/attachments/${id}`, { method: "DELETE" });
     if (detailShipment) loadAttachments(detailShipment.id);
   };
@@ -153,21 +163,7 @@ export default function Inbound() {
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Inbound Stock</h1>
-          <p className="page-subtitle">Log incoming stock and manage deliveries</p>
-        </div>
-        {can("inbound", "write") && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-              Bulk Upload
-              <input type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleBulkUpload(e.target.files[0])} />
-            </label>
-          </div>
-        )}
-      </div>
+      <PageHeader eyebrow="Supply Chain" title="Inbound Stock" subtitle="What's arriving from suppliers" />
 
       {message && (
         <div className={`alert alert-${message.type}`} style={{ marginBottom: 20 }}>
@@ -196,7 +192,9 @@ export default function Inbound() {
                 <select className="select" value={form.product_id} onChange={e => setForm({ ...form, product_id: e.target.value })} required>
                   <option value="">Select product...</option>
                   {products.filter(p => !p.archived && !p.is_forecast_test).map(p => (
-                    <option key={p.id} value={p.id}>{p.name} ({p.sku}) - {p.quantity} in stock</option>
+                    <option key={p.id} value={p.id} disabled={!!p.batch_tracking_enabled_at}>
+                      {p.name} ({p.sku}) - {formatQuantity(p.quantity)} in stock{p.batch_tracking_enabled_at ? " — receive through batch records" : ""}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -211,7 +209,7 @@ export default function Inbound() {
               </div>
               <div className="input-group">
                 <label className="input-label">Quantity *</label>
-                <input className="input" type="number" min="1" value={form.quantity} onChange={e => setForm({ ...form, quantity: Number(e.target.value) })} required />
+                <input className="input" type="number" min="0.01" step="0.01" value={form.quantity} onChange={e => setForm({ ...form, quantity: Number(e.target.value) })} required />
               </div>
               <div className="input-group">
                 <label className="input-label">Invoice / Ref #</label>
@@ -228,11 +226,14 @@ export default function Inbound() {
             </div>
 
             {selectedProduct && (
-              <div className="alert alert-success" style={{ marginBottom: 16 }}>
-                <span>
-                  Current stock of <strong>{selectedProduct.name}</strong>: {selectedProduct.quantity} units.
-                  After receiving: <strong>{selectedProduct.quantity + form.quantity}</strong> units.
-                </span>
+              <div style={{ marginBottom: 16 }}>
+                <BalanceStrip
+                  title={selectedProduct.name}
+                  subtitle={`SKU ${selectedProduct.sku}`}
+                  current={Number(selectedProduct.quantity)}
+                  after={Number(selectedProduct.quantity) + (Number(form.quantity) || 0)}
+                  tone={Number(form.quantity) > 0 ? "positive" : "neutral"}
+                />
               </div>
             )}
 
@@ -256,6 +257,15 @@ export default function Inbound() {
             onDragLeave={() => setDragging(false)}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
+            onKeyDown={event => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label="Upload inbound CSV or XLSX file"
           >
             <div style={{ marginBottom: 8 }}>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" strokeWidth="1.5" style={{ margin: "0 auto" }}>
@@ -267,13 +277,13 @@ export default function Inbound() {
               <br />
               or click to browse. Must include: product_name or sku, supplier_name, quantity.
             </div>
-            <input ref={fileInputRef} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={e => handleBulkUpload(e.target.files[0])} />
+            <input ref={fileInputRef} type="file" accept=".csv,.xlsx" style={{ display: "none" }} onChange={selectBulkFile} />
           </div>
         </div>
       </div>
       )}
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Inbound shipments">
         <table>
           <thead>
             <tr>
@@ -296,8 +306,8 @@ export default function Inbound() {
             ) : (
               shipments.map(s => (
                 <tr key={s.id}>
-                  <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", whiteSpace: "nowrap" }}>
-                    {s.received_date || "-"}
+                  <td className="mono" style={{ color: "var(--text-secondary)", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
+                    {formatPlainDate(s.received_date)}
                   </td>
                   <td>
                     <div style={{ fontWeight: 600 }}>{s.product_name}</div>
@@ -305,7 +315,7 @@ export default function Inbound() {
                   </td>
                   <td style={{ color: "var(--text-secondary)" }}>{s.supplier_name}</td>
                   <td>
-                    <span style={{ fontWeight: 700, color: "var(--green)" }}>+{s.quantity}</span>
+                    <span className="ledger-num ledger-num--up">+{formatQuantity(s.quantity)}</span>
                   </td>
                   <td>
                     {s.invoice_ref ? (
@@ -331,7 +341,7 @@ export default function Inbound() {
         </table>
       </div>
 
-      <Dialog open={!!detailShipment} onClose={() => { setDetailShipment(null); setAttachments([]); }} title="Inbound Shipment Details">
+      <Dialog open={!!detailShipment} onClose={() => { setDetailShipment(null); setAttachments([]); }} title="Inbound Shipment Details" maxWidth={640}>
         {detailShipment && (
           <div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
@@ -346,11 +356,11 @@ export default function Inbound() {
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Quantity</div>
-                <div style={{ fontWeight: 700, color: "var(--green)" }}>+{detailShipment.quantity}</div>
+                <div className="ledger-num ledger-num--up">+{formatQuantity(detailShipment.quantity)}</div>
               </div>
               <div>
                 <div className="muted" style={{ fontSize: "0.75rem", marginBottom: 2 }}>Received</div>
-                <div>{detailShipment.received_date || "-"}</div>
+                <div>{formatPlainDate(detailShipment.received_date)}</div>
               </div>
               {detailShipment.invoice_ref && (
                 <div>

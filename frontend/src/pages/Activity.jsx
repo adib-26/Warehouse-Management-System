@@ -1,87 +1,82 @@
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
-
-const ACTION_STYLES = {
-  CREATE: { bg: "var(--green-bg)", color: "var(--green)", label: "Created" },
-  UPDATE: { bg: "var(--blue-bg)", color: "var(--blue)", label: "Updated" },
-  DELETE: { bg: "var(--red-bg)", color: "var(--red)", label: "Deleted" },
-  ARCHIVE: { bg: "var(--yellow-bg)", color: "var(--yellow)", label: "Archived" },
-  STOCK_IN: { bg: "var(--green-bg)", color: "var(--green)", label: "Stock In" },
-  STOCK_OUT: { bg: "var(--red-bg)", color: "var(--red)", label: "Stock Out" },
-  STOCK_ADJUST: { bg: "var(--yellow-bg)", color: "var(--yellow)", label: "Adjusted" },
-};
+import { actionMeta, formatDateTime, formatDelta, MOVEMENT_ACTIONS } from "../format";
+import PageHeader from "../components/PageHeader";
 
 export default function Activity() {
   const [log, setLog] = useState([]);
-  const [stats, setStats] = useState(null);
   const [actionFilter, setActionFilter] = useState("");
+  // Action types observed in the data, accumulated across loads. The filter
+  // options come from a static list, so selecting one value no longer collapses
+  // the rest; this only adds types the backend reports that we don't know about.
+  const [extraActions, setExtraActions] = useState([]);
 
   const fetchData = useCallback(() => {
     const params = new URLSearchParams({ limit: "200" });
     if (actionFilter) params.set("action_type", actionFilter);
-    authFetch(`/movements?${params}`).then(r => r.json()).then(d => setLog(d.data)).catch(() => {});
-    authFetch(`/stats`).then(r => r.json()).then(setStats).catch(() => {});
+    authFetch(`/movements?${params}`)
+      .then(r => r.json())
+      .then(d => {
+        const rows = d.data || [];
+        setLog(rows);
+        setExtraActions(previous => {
+          const known = new Set([...MOVEMENT_ACTIONS, ...previous]);
+          const added = [];
+          for (const row of rows) {
+            if (row.action_type && !known.has(row.action_type)) {
+              known.add(row.action_type);
+              added.push(row.action_type);
+            }
+          }
+          return added.length > 0 ? [...previous, ...added] : previous;
+        });
+      })
+      .catch(() => {});
   }, [actionFilter]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const actionTypes = [...new Set(log.map(l => l.action_type))];
+  const filterOptions = [...MOVEMENT_ACTIONS, ...extraActions];
 
   return (
     <section>
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Activity Log</h1>
-          <p className="page-subtitle">Track all inventory changes</p>
-        </div>
-      </div>
-
-      {stats && (
-        <div className="grid-auto" style={{ marginBottom: 24 }}>
-          <div className="card stat-card" style={{ borderTopColor: "var(--blue)", padding: "16px 20px" }}>
-            <div className="stat-label">Total Products</div>
-            <div className="stat-value" style={{ fontSize: "1.5rem" }}>{stats.total_products}</div>
-          </div>
-          <div className="card stat-card" style={{ borderTopColor: "var(--green)", padding: "16px 20px" }}>
-            <div className="stat-label">Total Stock</div>
-            <div className="stat-value" style={{ fontSize: "1.5rem" }}>{stats.total_stock}</div>
-          </div>
-          <div className="card stat-card" style={{ borderTopColor: stats.low_stock_count > 0 ? "var(--red)" : "var(--green)", padding: "16px 20px" }}>
-            <div className="stat-label">Low Stock Items</div>
-            <div className="stat-value" style={{ fontSize: "1.5rem", color: stats.low_stock_count > 0 ? "var(--red)" : "inherit" }}>{stats.low_stock_count}</div>
-          </div>
-          <div className="card stat-card" style={{ borderTopColor: "var(--yellow)", padding: "16px 20px" }}>
-            <div className="stat-label">Activity (7 days)</div>
-            <div className="stat-value" style={{ fontSize: "1.5rem" }}>{stats.recent_activity}</div>
-          </div>
-        </div>
-      )}
+      <PageHeader eyebrow="Reports" title="Activity Log" subtitle="Every stock movement, newest first" />
 
       <div className="card" style={{ marginBottom: 20 }}>
-        <div className="card-body" style={{ paddingBottom: 12 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <span className="muted" style={{ fontSize: "0.8125rem" }}>Filter:</span>
-            <select className="select" value={actionFilter} onChange={e => setActionFilter(e.target.value)} style={{ width: "auto", minWidth: 160 }}>
+        <div className="card-body">
+          <div className="toolbar">
+            <label className="toolbar__label" htmlFor="activity-action">Action</label>
+            <select
+              id="activity-action"
+              className="select"
+              value={actionFilter}
+              onChange={e => setActionFilter(e.target.value)}
+              style={{ width: "auto", minWidth: 180 }}
+            >
               <option value="">All actions</option>
-              {actionTypes.map(a => (
-                <option key={a} value={a}>{a}</option>
+              {filterOptions.map(action => (
+                <option key={action} value={action}>{actionMeta(action).label}</option>
               ))}
             </select>
-            <span className="muted" style={{ marginLeft: "auto" }}>{log.length} record{log.length !== 1 ? "s" : ""}</span>
+            <span className="muted toolbar__count" role="status">
+              {log.length} record{log.length !== 1 ? "s" : ""}
+            </span>
           </div>
         </div>
       </div>
 
-      <div className="table-container">
+      <div className="table-container" tabIndex={0} role="region" aria-label="Activity log">
         {log.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-text">No activity recorded yet</div>
+            <div className="empty-state-text">
+              {actionFilter ? "No activity matches this filter" : "No activity recorded yet"}
+            </div>
           </div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th style={{ width: 160 }}>Timestamp</th>
+                <th style={{ width: 170 }}>Timestamp</th>
                 <th>Product</th>
                 <th>Action</th>
                 <th style={{ textAlign: "right" }}>Delta</th>
@@ -90,32 +85,29 @@ export default function Activity() {
             </thead>
             <tbody>
               {log.map(l => {
-                const style = ACTION_STYLES[l.action_type] || ACTION_STYLES.STOCK_ADJUST;
+                const meta = actionMeta(l.action_type);
+                const delta = Number(l.delta);
                 return (
                   <tr key={l.id}>
-                    <td style={{ fontSize: "0.8125rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
-                      {l.created_at ? new Date(l.created_at + "Z").toLocaleString() : "-"}
+                    <td className="mono" style={{ fontSize: "0.78rem", color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      {formatDateTime(l.created_at)}
                     </td>
                     <td>
                       <div style={{ fontWeight: 600 }}>{l.name}</div>
-                      <div className="muted" style={{ fontSize: "0.75rem" }}>{l.sku}</div>
+                      <div className="muted mono" style={{ fontSize: "0.74rem" }}>{l.sku}</div>
                     </td>
-                    <td>
-                      <span className="badge" style={{ background: style.bg, color: style.color }}>
-                        {style.label}
-                      </span>
-                    </td>
+                    <td><span className={`badge ${meta.cls}`}>{meta.label}</span></td>
                     <td style={{ textAlign: "right" }}>
-                      {l.delta !== 0 ? (
-                        <span style={{ fontWeight: 700, color: l.delta > 0 ? "var(--green)" : "var(--red)" }}>
-                          {l.delta > 0 ? "+" : ""}{l.delta}
+                      {delta !== 0 ? (
+                        <span className={`ledger-num ledger-num--${delta > 0 ? "up" : "down"}`}>
+                          {formatDelta(delta)}
                         </span>
                       ) : (
-                        <span className="muted">-</span>
+                        <span className="muted">—</span>
                       )}
                     </td>
                     <td style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
-                      {l.reason || "-"}
+                      {l.reason || "—"}
                     </td>
                   </tr>
                 );
