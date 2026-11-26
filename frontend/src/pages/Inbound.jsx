@@ -3,6 +3,7 @@ import { authFetch, downloadAttachment as apiDownloadAttachment } from "../api";
 import { useAuth } from "../AuthContext";
 import Dialog from "../components/Dialog";
 import BalanceStrip from "../components/BalanceStrip";
+import InlineAlert from "../components/InlineAlert";
 import { useConfirm } from "../components/FeedbackProvider";
 import { formatPlainDate, formatQuantity, responseErrorMessage } from "../format";
 import PageHeader from "../components/PageHeader";
@@ -30,6 +31,7 @@ export default function Inbound() {
   const [message, setMessage] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [detailShipment, setDetailShipment] = useState(null);
+  const [attachmentFeedback, setAttachmentFeedback] = useState(null);
   const [attachments, setAttachments] = useState([]);
   const [uploadFile, setUploadFile] = useState(null);
   const fileInputRef = useRef(null);
@@ -113,8 +115,11 @@ export default function Inbound() {
     }
   };
 
+  // Attachment actions run inside the detail dialog, where toasts are inert,
+  // so their outcome is reported inline in the dialog.
   const uploadAttachment = async () => {
     if (!uploadFile || !detailShipment) return;
+    setAttachmentFeedback(null);
     const formData = new FormData();
     formData.append("file", uploadFile);
     try {
@@ -123,28 +128,44 @@ export default function Inbound() {
         body: formData,
       });
       if (res.ok) {
+        setAttachmentFeedback({ type: "success", text: `${uploadFile.name} attached.` });
         setUploadFile(null);
         loadAttachments(detailShipment.id);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setAttachmentFeedback({ type: "error", text: responseErrorMessage(data, "Could not upload the attachment.") });
       }
-    } catch (error) {
-      console.error("Failed to upload inbound attachment", error);
+    } catch {
+      setAttachmentFeedback({ type: "error", text: "Could not reach the API." });
     }
   };
 
   const loadAttachments = (shipmentId) => {
     authFetch(`/inbound-shipments/${shipmentId}/attachments`)
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then(d => setAttachments(d.data))
-      .catch(error => console.error("Failed to load inbound attachments", error));
+      .catch(() => setAttachmentFeedback({ type: "error", text: "Could not load attachments." }));
   };
 
   const openDetail = (shipment) => {
+    setAttachmentFeedback(null);
     setDetailShipment(shipment);
     loadAttachments(shipment.id);
   };
 
+  const closeDetail = () => {
+    setDetailShipment(null);
+    setAttachments([]);
+    setAttachmentFeedback(null);
+  };
+
   const downloadAttachment = (id, filename) => {
-    apiDownloadAttachment(id, filename).catch(() => {});
+    apiDownloadAttachment(id, filename).catch(() => {
+      setAttachmentFeedback({ type: "error", text: `Could not download ${filename}.` });
+    });
   };
 
   const deleteAttachment = async (id) => {
@@ -155,7 +176,18 @@ export default function Inbound() {
       tone: "danger",
     });
     if (!ok) return;
-    await authFetch(`/attachments/${id}`, { method: "DELETE" });
+    setAttachmentFeedback(null);
+    try {
+      const res = await authFetch(`/attachments/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setAttachmentFeedback({ type: "error", text: responseErrorMessage(data, "Could not remove the attachment.") });
+        return;
+      }
+      setAttachmentFeedback({ type: "success", text: "Attachment removed." });
+    } catch {
+      setAttachmentFeedback({ type: "error", text: "Could not reach the API." });
+    }
     if (detailShipment) loadAttachments(detailShipment.id);
   };
 
@@ -341,7 +373,7 @@ export default function Inbound() {
         </table>
       </div>
 
-      <Dialog open={!!detailShipment} onClose={() => { setDetailShipment(null); setAttachments([]); }} title="Inbound Shipment Details" maxWidth={640}>
+      <Dialog open={!!detailShipment} onClose={closeDetail} title="Inbound Shipment Details" maxWidth={640}>
         {detailShipment && (
           <div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
@@ -378,6 +410,13 @@ export default function Inbound() {
 
             <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16, marginBottom: 16 }}>
               <h4 className="section-title">Attachments</h4>
+              <InlineAlert
+                type={attachmentFeedback?.type}
+                onDismiss={() => setAttachmentFeedback(null)}
+                style={{ marginBottom: 12 }}
+              >
+                {attachmentFeedback?.text}
+              </InlineAlert>
               {attachments.length > 0 ? (
                 <div style={{ display: "grid", gap: 8, marginBottom: 12 }}>
                   {attachments.map(a => (
@@ -420,7 +459,7 @@ export default function Inbound() {
             </div>
 
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => { setDetailShipment(null); setAttachments([]); }}>Close</button>
+              <button className="btn btn-ghost btn-sm" onClick={closeDetail}>Close</button>
             </div>
           </div>
         )}

@@ -84,6 +84,14 @@ export function formatDate(value) {
   return parsed ? parsed.toLocaleDateString() : EM_DASH;
 }
 
+/** Compact date and time for timelines, e.g. "Nov 26, 03:04 PM" in the viewer's locale. */
+export function formatShortDateTime(value) {
+  const parsed = parseApiDate(value);
+  return parsed
+    ? parsed.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : EM_DASH;
+}
+
 /**
  * Format a calendar date that carries no time ("2026-01-02", e.g. a dispatch
  * date). Rendered from its own parts so it never shifts a day in a timezone

@@ -148,7 +148,7 @@ function AppShell() {
   }
 
   const statusState = systemOnline === false ? "offline" : systemOnline ? "online" : "checking";
-  const statusLabel = systemOnline === false ? "System Offline" : systemOnline ? "System Online" : "Checking System";
+  const statusLabel = systemOnline === false ? "Offline" : systemOnline ? "Online" : "Checking";
 
   return (
     <div className="container">
@@ -171,14 +171,10 @@ function AppShell() {
           <Brand />
         </div>
         <div className="app-header__right">
-          <div className="app-status">
-            <span
-              className="status-dot"
-              data-state={statusState}
-              aria-label={statusLabel}
-            />
-            <span>{statusLabel}</span>
-          </div>
+          <p className="app-status" data-state={statusState}>
+            <span className="status-dot" data-state={statusState} aria-hidden="true" />
+            <span className="app-status__text">System {statusLabel}</span>
+          </p>
           <ThemeToggle />
         </div>
       </header>

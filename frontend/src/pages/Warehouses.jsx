@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
+import Dialog from "../components/Dialog";
+import InlineAlert from "../components/InlineAlert";
 import { useToast } from "../components/FeedbackProvider";
 import { responseErrorMessage } from "../format";
 import PageHeader from "../components/PageHeader";
 
-const emptyForm = { warehouse_code: "", name: "", address: "" };
+const EMPTY_WAREHOUSE = { warehouse_code: "", name: "", address: "" };
 
 export default function Warehouses() {
   const { can } = useAuth();
   const toast = useToast();
   const [warehouses, setWarehouses] = useState([]);
-  const [form, setForm] = useState(emptyForm);
+  // null when the dialog is closed, otherwise the draft values.
+  const [form, setForm] = useState(null);
+  const [formError, setFormError] = useState(null);
   const [saving, setSaving] = useState(false);
 
   const loadWarehouses = useCallback(async () => {
@@ -19,6 +23,7 @@ export default function Warehouses() {
       const response = await authFetch("/warehouses?include_inactive=true&limit=500");
       const data = await response.json();
       if (response.ok) setWarehouses(data.data || []);
+      else toast.error(responseErrorMessage(data, "Could not load warehouses."));
     } catch {
       toast.error("Could not load warehouses.");
     }
@@ -26,26 +31,32 @@ export default function Warehouses() {
 
   useEffect(() => { loadWarehouses(); }, [loadWarehouses]);
 
+  const openAdd = () => { setFormError(null); setForm({ ...EMPTY_WAREHOUSE }); };
+  const closeForm = () => { setForm(null); setFormError(null); };
+
+  // Errors stay inside the dialog (the toast region is inert behind it) and
+  // the dialog stays open so the operator's input is kept.
   const createWarehouse = async (event) => {
     event.preventDefault();
-    if (!form.warehouse_code.trim() || !form.name.trim()) return;
+    if (!form?.warehouse_code.trim() || !form?.name.trim()) return;
     setSaving(true);
+    setFormError(null);
     try {
       const response = await authFetch("/warehouses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        toast.error(responseErrorMessage(data, "Could not create warehouse."));
+        setFormError(responseErrorMessage(data, "Could not create warehouse."));
         return;
       }
-      setForm(emptyForm);
+      closeForm();
       toast.success(`${data.name} is ready for outbound dispatches.`);
       loadWarehouses();
     } catch {
-      toast.error("Could not reach the API.");
+      setFormError("Could not reach the API.");
     } finally {
       setSaving(false);
     }
@@ -58,7 +69,7 @@ export default function Warehouses() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         toast.error(responseErrorMessage(data, "Could not update warehouse."));
         return;
@@ -71,46 +82,25 @@ export default function Warehouses() {
   };
 
   const canWrite = can("admin", "write");
+  const set = (patch) => setForm(current => ({ ...current, ...patch }));
 
   return (
     <section>
-      <PageHeader eyebrow="Administration" title="Warehouses" subtitle="Where stock is held" />
-
-      {canWrite && (
-        <div className="card" style={{ marginBottom: 20 }}>
-          <div className="card-body">
-            <h2 className="section-title">Add Warehouse</h2>
-            <form onSubmit={createWarehouse}>
-              <div className="form-grid" style={{ marginBottom: 16 }}>
-                <div className="input-group">
-                  <label className="input-label" htmlFor="warehouse-code">Warehouse Code *</label>
-                  <input id="warehouse-code" className="input" placeholder="KL-01" value={form.warehouse_code} onChange={e => setForm({ ...form, warehouse_code: e.target.value })} required />
-                </div>
-                <div className="input-group">
-                  <label className="input-label" htmlFor="warehouse-name">Name *</label>
-                  <input id="warehouse-name" className="input" placeholder="Kuala Lumpur Main" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
-                </div>
-                <div className="input-group" style={{ gridColumn: "1 / -1" }}>
-                  <label className="input-label" htmlFor="warehouse-address">Address</label>
-                  <input id="warehouse-address" className="input" placeholder="Optional address or location note" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} />
-                </div>
-              </div>
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button className="btn btn-primary btn-sm" type="submit" disabled={saving || !form.warehouse_code.trim() || !form.name.trim()}>
-                  {saving ? "Saving..." : "Add Warehouse"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <PageHeader
+        eyebrow="Administration"
+        title="Warehouses"
+        subtitle="Where stock is held"
+        actions={canWrite && (
+          <button className="btn btn-primary btn-sm" onClick={openAdd}>Add Warehouse</button>
+        )}
+      />
 
       <div className="table-container" tabIndex={0} role="region" aria-label="Warehouses">
         <table>
           <thead>
             <tr>
-              <th>Warehouse</th>
               <th>Code</th>
+              <th>Warehouse</th>
               <th>Address</th>
               <th>Status</th>
               {canWrite && <th style={{ textAlign: "right" }}>Actions</th>}
@@ -125,13 +115,13 @@ export default function Warehouses() {
               </tr>
             ) : warehouses.map(warehouse => (
               <tr key={warehouse.id}>
+                <td><span className="sku">{warehouse.warehouse_code}</span></td>
                 <td style={{ fontWeight: 600 }}>{warehouse.name}</td>
-                <td><span className="badge badge-neutral mono">{warehouse.warehouse_code}</span></td>
                 <td className="muted">{warehouse.address || "—"}</td>
                 <td>
-                  <span className={`badge ${warehouse.active ? "badge-success" : "badge-neutral"}`}>
-                    {warehouse.active ? "Active" : "Inactive"}
-                  </span>
+                  {warehouse.active
+                    ? <span className="badge badge-success">Active</span>
+                    : <span className="badge badge-neutral">Inactive</span>}
                 </td>
                 {canWrite && (
                   <td style={{ textAlign: "right" }}>
@@ -145,6 +135,61 @@ export default function Warehouses() {
           </tbody>
         </table>
       </div>
+
+      <Dialog open={!!form} onClose={closeForm} title="New Warehouse" maxWidth={560}>
+        {form && (
+          <form onSubmit={createWarehouse}>
+            <div className="form-grid">
+              <div className="input-group">
+                <label className="input-label" htmlFor="warehouse-code">Warehouse code *</label>
+                <input
+                  id="warehouse-code"
+                  className="input mono"
+                  placeholder="KL-01"
+                  value={form.warehouse_code}
+                  onChange={e => set({ warehouse_code: e.target.value.toUpperCase() })}
+                  required
+                />
+                <span className="input-hint">Short code used on dispatch records.</span>
+              </div>
+              <div className="input-group">
+                <label className="input-label" htmlFor="warehouse-name">Name *</label>
+                <input
+                  id="warehouse-name"
+                  className="input"
+                  placeholder="Kuala Lumpur Main"
+                  value={form.name}
+                  onChange={e => set({ name: e.target.value })}
+                  required
+                />
+              </div>
+              <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+                <label className="input-label" htmlFor="warehouse-address">Address</label>
+                <input
+                  id="warehouse-address"
+                  className="input"
+                  placeholder="Optional address or location note"
+                  value={form.address}
+                  onChange={e => set({ address: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <InlineAlert onDismiss={() => setFormError(null)} style={{ marginTop: 20 }}>{formError}</InlineAlert>
+
+            <div className="dialog-actions">
+              <button type="button" className="btn btn-ghost btn-sm" onClick={closeForm}>Cancel</button>
+              <button
+                className="btn btn-primary btn-sm"
+                type="submit"
+                disabled={saving || !form.warehouse_code.trim() || !form.name.trim()}
+              >
+                {saving ? "Saving..." : "Add Warehouse"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Dialog>
     </section>
   );
 }

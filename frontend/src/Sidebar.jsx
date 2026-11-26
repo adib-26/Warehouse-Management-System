@@ -70,7 +70,7 @@ export default function Sidebar({ onNavigate }) {
           <div style={{ fontWeight: 600, fontSize: "0.8125rem" }}>{user?.full_name || user?.username}</div>
           <div className="muted" style={{ fontSize: "0.7rem", textTransform: "capitalize" }}>{user?.role}</div>
         </div>
-        <button className="nav-item" onClick={logout} style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left", font: "inherit" }}>
+        <button className="nav-item" onClick={logout} style={{ width: "100%", background: "none", border: "none", cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
           Sign Out
         </button>
       </div>

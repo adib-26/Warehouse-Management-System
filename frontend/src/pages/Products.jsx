@@ -3,6 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
 import Dialog from "../components/Dialog";
+import InlineAlert from "../components/InlineAlert";
+import SearchField from "../components/SearchField";
 import { useToast, useConfirm } from "../components/FeedbackProvider";
 import { formatQuantity, responseErrorMessage } from "../format";
 import PageHeader from "../components/PageHeader";
@@ -20,21 +22,13 @@ const EMPTY_PRODUCT = {
   low_stock: 10,
 };
 
-function SearchIcon() {
-  return (
-    <svg className="search-field__icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.5-3.5" />
-    </svg>
-  );
-}
 
 /**
  * One form for both creating and editing. `mode` drives the two differences:
  * new SKUs are upper-cased as they are typed, and a batch-tracked product's
  * quantity is read-only because it is derived from its inventory batches.
  */
-function ProductFormDialog({ form, onClose, onChange, onSubmit, submitting }) {
+function ProductFormDialog({ form, onClose, onChange, onSubmit, submitting, error, onDismissError }) {
   const open = !!form;
   const values = form?.values ?? EMPTY_PRODUCT;
   const isAdd = form?.mode === "add";
@@ -127,6 +121,7 @@ function ProductFormDialog({ form, onClose, onChange, onSubmit, submitting }) {
             />
           </div>
         </div>
+        <InlineAlert onDismiss={onDismissError} style={{ marginTop: 20 }}>{error}</InlineAlert>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 22 }}>
           <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
@@ -155,6 +150,7 @@ export default function Products() {
   const [showLowStock, setShowLowStock] = useState(() => searchParams.get("low_stock") === "true");
   const [showArchived, setShowArchived] = useState(() => searchParams.get("archived") === "true");
   const [form, setForm] = useState(null);
+  const [formError, setFormError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -192,13 +188,17 @@ export default function Products() {
     authFetch("/products/facets").then(r => r.json()).then(setFacets).catch(() => {});
   }, []);
 
-  const openAdd = () => setForm({ mode: "add", values: { ...EMPTY_PRODUCT } });
-  const openEdit = (product) => setForm({ mode: "edit", values: { ...product } });
+  const openAdd = () => { setFormError(null); setForm({ mode: "add", values: { ...EMPTY_PRODUCT } }); };
+  const openEdit = (product) => { setFormError(null); setForm({ mode: "edit", values: { ...product } }); };
+  const closeForm = () => { setForm(null); setFormError(null); };
 
+  // Errors stay inside the dialog (the toast region is inert behind it) and
+  // the dialog stays open so the operator's input is kept.
   const submitForm = async (event) => {
     event.preventDefault();
     if (!form) return;
     setSubmitting(true);
+    setFormError(null);
     const values = form.values;
     try {
       if (form.mode === "add") {
@@ -209,11 +209,11 @@ export default function Products() {
         });
         const data = await res.json();
         if (res.status === 201) {
-          setForm(null);
+          closeForm();
           load();
           toast.success(`${values.name} (${values.sku}) has been created.`);
         } else {
-          toast.error(responseErrorMessage(data, "Could not add product."));
+          setFormError(responseErrorMessage(data, "Could not add product."));
         }
       } else {
         const res = await authFetch(`/products/${values.id}`, {
@@ -232,16 +232,16 @@ export default function Products() {
           }),
         });
         if (res.ok) {
-          setForm(null);
+          closeForm();
           load();
           toast.success("Changes saved.");
         } else {
           const data = await res.json();
-          toast.error(responseErrorMessage(data, "Could not update product."));
+          setFormError(responseErrorMessage(data, "Could not update product."));
         }
       }
     } catch {
-      toast.error("Could not reach the API.");
+      setFormError("Could not reach the API.");
     } finally {
       setSubmitting(false);
     }
@@ -380,69 +380,60 @@ export default function Products() {
         </div>
       )}
 
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div className="card-body">
-          <div className="toolbar">
-            <span className="search-field">
-              <SearchIcon />
-              <input
-                className="input"
-                type="search"
-                aria-label="Search products"
-                placeholder="Search name, SKU, or description..."
-                value={q}
-                onChange={e => setQ(e.target.value)}
-              />
-            </span>
+      <div className="toolbar" style={{ marginBottom: 16 }}>
+        <SearchField
+          value={q}
+          onChange={setQ}
+          label="Search products"
+          placeholder="Search name, SKU, or description..."
+        />
 
-            <select
-              className="select"
-              aria-label="Filter by category"
-              value={categoryFilter}
-              onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }}
-              style={{ width: "auto", minWidth: 150 }}
-            >
-              <option value="">All categories</option>
-              {facets.categories.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+        <select
+          className="select"
+          aria-label="Filter by category"
+          value={categoryFilter}
+          onChange={e => { setCategoryFilter(e.target.value); setOffset(0); }}
+          style={{ width: "auto", minWidth: 150 }}
+        >
+          <option value="">All categories</option>
+          {facets.categories.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
 
-            {facets.tags.length > 0 && (
-              <select
-                className="select"
-                aria-label="Filter by tag"
-                value={tagFilter}
-                onChange={e => { setTagFilter(e.target.value); setOffset(0); }}
-                style={{ width: "auto", minWidth: 130 }}
-              >
-                <option value="">All tags</option>
-                {facets.tags.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-            )}
+        {facets.tags.length > 0 && (
+          <select
+            className="select"
+            aria-label="Filter by tag"
+            value={tagFilter}
+            onChange={e => { setTagFilter(e.target.value); setOffset(0); }}
+            style={{ width: "auto", minWidth: 130 }}
+          >
+            <option value="">All tags</option>
+            {facets.tags.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
 
-            <label className="chip">
-              <input
-                className="chip__input"
-                type="checkbox"
-                checked={showLowStock}
-                onChange={e => { setShowLowStock(e.target.checked); setOffset(0); }}
-              />
-              Low stock
-            </label>
-            <label className="chip">
-              <input
-                className="chip__input"
-                type="checkbox"
-                checked={showArchived}
-                onChange={e => { setShowArchived(e.target.checked); setOffset(0); }}
-              />
-              Archived
-            </label>
+        <label className="chip">
+          <input
+            className="chip__input"
+            type="checkbox"
+            checked={showLowStock}
+            onChange={e => { setShowLowStock(e.target.checked); setOffset(0); }}
+          />
+          Low stock
+        </label>
+        <label className="chip">
+          <input
+            className="chip__input"
+            type="checkbox"
+            checked={showArchived}
+            onChange={e => { setShowArchived(e.target.checked); setOffset(0); }}
+          />
+          Archived
+        </label>
 
-            <span className="muted toolbar__count" role="status">
-              {total} product{total !== 1 ? "s" : ""}
-            </span>
-          </div>
-        </div>
+        <span className="muted toolbar__count" role="status">
+          {total} product{total !== 1 ? "s" : ""}
+        </span>
       </div>
 
       <div className="table-container" tabIndex={0} role="region" aria-label="Products">
@@ -482,15 +473,15 @@ export default function Products() {
                         </div>
                       )}
                     </td>
-                    <td><span className="badge badge-neutral mono">{p.sku}</span></td>
+                    <td><span className="sku">{p.sku}</span></td>
                     <td style={{ color: "var(--text-secondary)" }}>{p.category || "—"}</td>
                     <td>
                       {tagList.length === 0 ? (
                         <span className="muted">—</span>
                       ) : (
-                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                          {tagList.map(t => <span key={t} className="badge badge-info">{t}</span>)}
-                        </div>
+                        <ul className="tag-list">
+                          {tagList.map(t => <li key={t} className="tag">{t}</li>)}
+                        </ul>
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>
@@ -562,7 +553,9 @@ export default function Products() {
       <ProductFormDialog
         form={form}
         submitting={submitting}
-        onClose={() => setForm(null)}
+        error={formError}
+        onDismissError={() => setFormError(null)}
+        onClose={closeForm}
         onChange={values => setForm(current => (current ? { ...current, values } : current))}
         onSubmit={submitForm}
       />

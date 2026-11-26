@@ -5,6 +5,9 @@ import { BrowserRouter } from "react-router-dom"
 // The `standard` Archivo variant adds the width axis used by the condensed wordmark.
 import "@fontsource-variable/archivo/standard.css"
 import "@fontsource-variable/jetbrains-mono"
+// Saira (width + weight axes) is the condensed display face for headings,
+// the wordmark, and the dashboard's hero figures.
+import "@fontsource-variable/saira/wdth.css"
 import App from "./App"
 import "./index.css"
 

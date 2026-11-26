@@ -141,8 +141,9 @@ export function FeedbackProvider({ children }) {
           onClose={() => settle(false)}
           title={confirmOptions?.title || "Are you sure?"}
           maxWidth={460}
+          tone={destructive ? "danger" : undefined}
         >
-          <p style={{ margin: 0, color: "var(--text-secondary)" }}>{confirmOptions?.message}</p>
+          <p style={{ margin: 0, color: "var(--text-primary)" }}>{confirmOptions?.message}</p>
           <div className="dialog-actions">
             {/* A destructive confirmation focuses the safe action. */}
             <button

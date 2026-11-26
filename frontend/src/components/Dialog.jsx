@@ -5,9 +5,14 @@ import { useEffect, useId, useRef } from "react";
  * backdrop, top-layer rendering, focus containment, Escape handling, and focus
  * return, so there is no hand-rolled focus trap or role="dialog".
  *
- * Props: open, onClose, title, children, maxWidth (px).
+ * Toasts render outside the dialog and are inert while it is open, so report
+ * errors from inside a dialog with <InlineAlert> in the dialog body.
+ *
+ * Props: open, onClose, title, children, maxWidth (px), tone.
+ * tone="danger" swaps the plain top rule for the hazard stripe; reserve it for
+ * destructive confirmations.
  */
-export default function Dialog({ open, onClose, title, children, maxWidth = 560 }) {
+export default function Dialog({ open, onClose, title, children, maxWidth = 560, tone }) {
   const ref = useRef(null);
   const titleId = useId();
 
@@ -53,10 +58,11 @@ export default function Dialog({ open, onClose, title, children, maxWidth = 560 
   return (
     <dialog
       ref={ref}
-      className="app-dialog"
+      className={`app-dialog${tone === "danger" ? " app-dialog--danger" : ""}`}
       aria-labelledby={title ? titleId : undefined}
       style={{ width: `min(92vw, ${maxWidth}px)` }}
     >
+      <div className={tone === "danger" ? "hazard-stripe" : "app-dialog__rule"} aria-hidden="true" />
       <div className="app-dialog__inner">
         {title && (
           <div className="app-dialog__head">

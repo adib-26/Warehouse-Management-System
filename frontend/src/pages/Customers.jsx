@@ -1,68 +1,70 @@
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
-import Dialog from "../components/Dialog";
+import PartyFormDialog, { EMPTY_PARTY } from "../components/PartyFormDialog";
+import SearchField from "../components/SearchField";
 import { useToast, useConfirm } from "../components/FeedbackProvider";
+import { responseErrorMessage } from "../format";
 import PageHeader from "../components/PageHeader";
+
+const SEARCH_DEBOUNCE_MS = 300;
 
 export default function Customers() {
   const { can } = useAuth();
-  const [customers, setCustomers] = useState([]);
-  const [q, setQ] = useState("");
-  const [form, setForm] = useState({ name: "", contact_person: "", email: "", phone: "", address: "", notes: "" });
-  const [editing, setEditing] = useState(null);
   const toast = useToast();
   const confirm = useConfirm();
+  const [customers, setCustomers] = useState([]);
+  const [q, setQ] = useState("");
+  // The list refetches as the query settles, so there is no Search button.
+  const [appliedQ, setAppliedQ] = useState("");
+  // null when the dialog is closed, otherwise { mode, values }.
+  const [form, setForm] = useState(null);
+  const [formError, setFormError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAppliedQ(q), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [q]);
 
   const load = useCallback(() => {
-    const params = q ? `?q=${encodeURIComponent(q)}` : "";
+    const params = appliedQ ? `?q=${encodeURIComponent(appliedQ)}` : "";
     authFetch(`/customers${params}`).then(r => r.json()).then(d => setCustomers(d.data)).catch(() => {});
-  }, [q]);
+  }, [appliedQ]);
 
   useEffect(() => { load(); }, [load]);
 
-  const showMsg = (title, body, variant = "success") =>
-    (variant === "error" ? toast.error(body) : toast.success(body));
+  const openAdd = () => { setFormError(null); setForm({ mode: "add", values: { ...EMPTY_PARTY } }); };
+  const openEdit = (customer) => { setFormError(null); setForm({ mode: "edit", values: { ...customer } }); };
+  const closeForm = () => { setForm(null); setFormError(null); };
 
-  const addCustomer = async (e) => {
-    e.preventDefault();
+  // Errors stay inside the dialog (the toast region is inert behind it) and
+  // the dialog stays open so the operator's input is kept.
+  const submitForm = async (event) => {
+    event.preventDefault();
+    if (!form) return;
+    setSubmitting(true);
+    setFormError(null);
+    const values = form.values;
+    const isAdd = form.mode === "add";
     try {
-      const res = await authFetch(`/customers`, {
-        method: "POST",
+      const res = await authFetch(isAdd ? "/customers" : `/customers/${values.id}`, {
+        method: isAdd ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(values),
       });
-      const data = await res.json();
-      if (res.status === 201) {
-        setForm({ name: "", contact_person: "", email: "", phone: "", address: "", notes: "" });
+      if (isAdd ? res.status === 201 : res.ok) {
+        closeForm();
         load();
-        showMsg("Customer added", `${form.name} has been created.`);
+        toast.success(isAdd ? `${values.name} has been created.` : "Changes saved.");
       } else {
-        showMsg("Error", data.detail || "Could not add customer.", "error");
+        const data = await res.json().catch(() => ({}));
+        setFormError(responseErrorMessage(data, isAdd ? "Could not add customer." : "Could not update customer."));
       }
     } catch {
-      showMsg("Network error", "Could not reach the API.", "error");
-    }
-  };
-
-  const updateCustomer = async () => {
-    if (!editing) return;
-    try {
-      const res = await authFetch(`/customers/${editing.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editing),
-      });
-      if (res.ok) {
-        setEditing(null);
-        load();
-        showMsg("Customer updated", "Changes saved successfully.");
-      } else {
-        const data = await res.json();
-        showMsg("Error", data.detail || "Could not update.", "error");
-      }
-    } catch {
-      showMsg("Network error", "Could not reach the API.", "error");
+      setFormError("Could not reach the API.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -75,70 +77,42 @@ export default function Customers() {
     });
     if (!ok) return;
     try {
-      await authFetch(`/customers/${id}`, { method: "DELETE" });
+      const res = await authFetch(`/customers/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast.error(responseErrorMessage(data, "Could not delete customer."));
+        return;
+      }
       load();
-      showMsg("Customer deleted", `${name} has been removed.`);
+      toast.success(`${name} has been removed.`);
     } catch {
-      showMsg("Error", "Could not delete customer.", "error");
+      toast.error("Could not delete customer.");
     }
   };
 
+  const canWrite = can("customers", "write");
+
   return (
     <section>
-      <PageHeader eyebrow="Supply Chain" title="Customers" subtitle="Who you ship to" />
+      <PageHeader
+        eyebrow="Supply Chain"
+        title="Customers"
+        subtitle="Who you ship to"
+        actions={canWrite && (
+          <button className="btn btn-primary btn-sm" onClick={openAdd}>Add Customer</button>
+        )}
+      />
 
-      {can("customers", "write") && (
-      <form onSubmit={addCustomer} className="card" style={{ marginBottom: 20 }}>
-        <div className="card-body">
-          <h3 className="section-title">Add New Customer</h3>
-          <div className="form-grid">
-            <div className="input-group">
-              <label className="input-label">Name *</label>
-              <input className="input" placeholder="Customer name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
-            </div>
-            <div className="input-group">
-              <label className="input-label">Contact Person</label>
-              <input className="input" placeholder="John Doe" value={form.contact_person} onChange={e => setForm({ ...form, contact_person: e.target.value })} />
-            </div>
-            <div className="input-group">
-              <label className="input-label">Email</label>
-              <input className="input" type="email" placeholder="customer@example.com" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} />
-            </div>
-            <div className="input-group">
-              <label className="input-label">Phone</label>
-              <input className="input" placeholder="+1 (555) 000-0000" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} />
-            </div>
-            <div className="input-group" style={{ gridColumn: "1 / -1" }}>
-              <label className="input-label">Address</label>
-              <input className="input" placeholder="Full address" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} />
-            </div>
-            <div className="input-group" style={{ gridColumn: "1 / -1" }}>
-              <label className="input-label">Notes</label>
-              <textarea className="input textarea" placeholder="Additional notes..." value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
-            </div>
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-            <button type="submit" className="btn btn-primary btn-sm">Add Customer</button>
-          </div>
-        </div>
-      </form>
-      )}
-
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div className="card-body" style={{ paddingBottom: 12 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <input
-              className="input"
-              placeholder="Search customers..."
-              value={q}
-              onChange={e => setQ(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && load()}
-              style={{ maxWidth: 320 }}
-            />
-            <button className="btn btn-secondary btn-sm" onClick={load}>Search</button>
-            <span className="muted" style={{ marginLeft: "auto" }}>{customers.length} customer{customers.length !== 1 ? "s" : ""}</span>
-          </div>
-        </div>
+      <div className="toolbar" style={{ marginBottom: 16 }}>
+        <SearchField
+          value={q}
+          onChange={setQ}
+          label="Search customers"
+          placeholder="Search name, contact, or email..."
+        />
+        <span className="muted toolbar__count" role="status">
+          {customers.length} customer{customers.length !== 1 ? "s" : ""}
+        </span>
       </div>
 
       <div className="table-container" tabIndex={0} role="region" aria-label="Customers">
@@ -164,17 +138,17 @@ export default function Customers() {
               customers.map(c => (
                 <tr key={c.id}>
                   <td>
-                    <div style={{ fontWeight: 600 }}>{c.name}</div>
-                    {c.notes && <div className="muted" style={{ fontSize: "0.8rem", marginTop: 2 }}>{c.notes.slice(0, 60)}{c.notes.length > 60 ? "..." : ""}</div>}
+                    <div className="cell-strong">{c.name}</div>
+                    {c.notes && <div className="cell-sub">{c.notes}</div>}
                   </td>
-                  <td style={{ color: "var(--text-secondary)" }}>{c.contact_person || "-"}</td>
-                  <td style={{ color: "var(--text-secondary)" }}>{c.email || "-"}</td>
-                  <td style={{ color: "var(--text-secondary)" }}>{c.phone || "-"}</td>
-                  <td style={{ color: "var(--text-secondary)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.address || "-"}</td>
+                  <td className="cell-quiet cell-nowrap">{c.contact_person || "—"}</td>
+                  <td className="cell-quiet cell-nowrap">{c.email || "—"}</td>
+                  <td className="cell-quiet cell-nowrap mono" style={{ fontSize: "0.8rem" }}>{c.phone || "—"}</td>
+                  <td className="cell-quiet cell-clip">{c.address || "—"}</td>
                   <td style={{ textAlign: "right" }}>
-                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      {can("customers", "write") && (
-                        <button className="btn btn-ghost btn-xs" onClick={() => setEditing({ ...c })}>Edit</button>
+                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      {canWrite && (
+                        <button className="btn btn-ghost btn-xs" onClick={() => openEdit(c)}>Edit</button>
                       )}
                       {can("customers", "delete") && (
                         <button className="btn btn-danger btn-xs" onClick={() => deleteCustomer(c.id, c.name)}>Delete</button>
@@ -188,44 +162,16 @@ export default function Customers() {
         </table>
       </div>
 
-      <Dialog open={!!editing} onClose={() => setEditing(null)} title="Edit Customer">
-        {editing && (
-          <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <div className="input-group">
-                <label className="input-label">Name</label>
-                <input className="input" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Contact Person</label>
-                <input className="input" value={editing.contact_person} onChange={e => setEditing({ ...editing, contact_person: e.target.value })} />
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <div className="input-group">
-                  <label className="input-label">Email</label>
-                  <input className="input" value={editing.email} onChange={e => setEditing({ ...editing, email: e.target.value })} />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">Phone</label>
-                  <input className="input" value={editing.phone} onChange={e => setEditing({ ...editing, phone: e.target.value })} />
-                </div>
-              </div>
-              <div className="input-group">
-                <label className="input-label">Address</label>
-                <input className="input" value={editing.address} onChange={e => setEditing({ ...editing, address: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Notes</label>
-                <textarea className="input textarea" value={editing.notes} onChange={e => setEditing({ ...editing, notes: e.target.value })} />
-              </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={updateCustomer}>Save Changes</button>
-            </div>
-          </div>
-        )}
-      </Dialog>
+      <PartyFormDialog
+        form={form}
+        noun="Customer"
+        submitting={submitting}
+        error={formError}
+        onDismissError={() => setFormError(null)}
+        onClose={closeForm}
+        onChange={values => setForm(current => (current ? { ...current, values } : current))}
+        onSubmit={submitForm}
+      />
     </section>
   );
 }

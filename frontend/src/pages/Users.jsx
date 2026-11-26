@@ -2,19 +2,108 @@ import { useEffect, useState } from "react";
 import { authFetch } from "../api";
 import { useAuth } from "../AuthContext";
 import Dialog from "../components/Dialog";
+import InlineAlert from "../components/InlineAlert";
 import { useToast } from "../components/FeedbackProvider";
-import { formatDate } from "../format";
+import { formatDate, responseErrorMessage } from "../format";
 import PageHeader from "../components/PageHeader";
 
 const ROLES = ["admin", "manager", "operator"];
+const MIN_PASSWORD = 12;
+
+const EMPTY_USER = { username: "", password: "", full_name: "", role: "operator" };
+
+const titleCase = (value) => value.charAt(0).toUpperCase() + value.slice(1);
+
+/**
+ * One dialog for both creating and editing an account. Creating asks for a
+ * username and password; editing locks the username and offers an optional
+ * password reset instead.
+ */
+function UserFormDialog({ form, onClose, onChange, onSubmit, submitting, error, onDismissError }) {
+  const open = !!form;
+  const values = form?.values ?? EMPTY_USER;
+  const isAdd = form?.mode === "add";
+  const set = (patch) => onChange({ ...values, ...patch });
+
+  return (
+    <Dialog open={open} onClose={onClose} title={isAdd ? "New User" : "Edit User"} maxWidth={560}>
+      <form onSubmit={onSubmit}>
+        <div className="form-grid">
+          <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="input-label" htmlFor="user-username">Username {isAdd && "*"}</label>
+            <input
+              id="user-username"
+              className="input mono"
+              placeholder="jdoe"
+              value={values.username || ""}
+              onChange={e => set({ username: e.target.value })}
+              disabled={!isAdd}
+              required={isAdd}
+            />
+            {!isAdd && <span className="input-hint">A username cannot be changed after the account is created.</span>}
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="user-fullname">Full name</label>
+            <input
+              id="user-fullname"
+              className="input"
+              placeholder="Jane Doe"
+              value={values.full_name || ""}
+              onChange={e => set({ full_name: e.target.value })}
+            />
+          </div>
+          <div className="input-group">
+            <label className="input-label" htmlFor="user-role">Role *</label>
+            <select
+              id="user-role"
+              className="select"
+              value={values.role}
+              onChange={e => set({ role: e.target.value })}
+            >
+              {ROLES.map(r => <option key={r} value={r}>{titleCase(r)}</option>)}
+            </select>
+          </div>
+          <div className="input-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="input-label" htmlFor="user-password">
+              {isAdd ? "Password *" : "Reset password"}
+            </label>
+            <input
+              id="user-password"
+              className="input"
+              type="password"
+              value={values.password || ""}
+              onChange={e => set({ password: e.target.value })}
+              minLength={MIN_PASSWORD}
+              maxLength={72}
+              autoComplete="new-password"
+              required={isAdd}
+              placeholder={isAdd ? "" : "Leave blank to keep the current password"}
+            />
+            <span className="input-hint">At least {MIN_PASSWORD} characters.</span>
+          </div>
+        </div>
+
+        <InlineAlert onDismiss={onDismissError} style={{ marginTop: 20 }}>{error}</InlineAlert>
+
+        <div className="dialog-actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={submitting}>
+            {submitting ? "Saving..." : isAdd ? "Add User" : "Save changes"}
+          </button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 
 export default function Users() {
   const { user: me, can } = useAuth();
-  const [users, setUsers] = useState([]);
-  const [form, setForm] = useState({ username: "", password: "", full_name: "", role: "operator" });
-  const [editing, setEditing] = useState(null);
-  const [newPassword, setNewPassword] = useState("");
   const toast = useToast();
+  const [users, setUsers] = useState([]);
+  // null when the dialog is closed, otherwise { mode, values }.
+  const [form, setForm] = useState(null);
+  const [formError, setFormError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const load = () => {
     authFetch("/admin/users").then(r => r.json()).then(d => setUsers(d.data)).catch(() => {});
@@ -22,51 +111,50 @@ export default function Users() {
 
   useEffect(() => { load(); }, []);
 
-  const showMsg = (body, variant = "success") =>
-    (variant === "error" ? toast.error(body) : toast.success(body));
-
-  const addUser = async (e) => {
-    e.preventDefault();
-    try {
-      const res = await authFetch("/admin/users", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setForm({ username: "", password: "", full_name: "", role: "operator" });
-        load();
-        showMsg(`User '${form.username}' created with role ${form.role}.`);
-      } else {
-        showMsg(data.detail || "Could not create user.", "error");
-      }
-    } catch {
-      showMsg("Could not reach the API.", "error");
-    }
+  const openAdd = () => { setFormError(null); setForm({ mode: "add", values: { ...EMPTY_USER } }); };
+  const openEdit = (u) => {
+    setFormError(null);
+    // password is the optional reset field, so it always starts empty.
+    setForm({ mode: "edit", values: { ...u, password: "" } });
   };
+  const closeForm = () => { setForm(null); setFormError(null); };
 
-  const saveUser = async () => {
-    if (!editing) return;
-    const payload = { full_name: editing.full_name, role: editing.role, active: !!editing.active };
-    if (newPassword) payload.password = newPassword;
+  // Errors stay inside the dialog (the toast region is inert behind it) and
+  // the dialog stays open so the operator's input is kept.
+  const submitForm = async (event) => {
+    event.preventDefault();
+    if (!form) return;
+    setSubmitting(true);
+    setFormError(null);
+    const values = form.values;
+    const isAdd = form.mode === "add";
+    const payload = isAdd
+      ? { username: values.username, password: values.password, full_name: values.full_name, role: values.role }
+      : {
+          full_name: values.full_name,
+          role: values.role,
+          active: !!values.active,
+          // Only sent when the operator actually typed a new password.
+          ...(values.password ? { password: values.password } : {}),
+        };
     try {
-      const res = await authFetch(`/admin/users/${editing.id}`, {
-        method: "PATCH",
+      const res = await authFetch(isAdd ? "/admin/users" : `/admin/users/${values.id}`, {
+        method: isAdd ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
       if (res.ok) {
-        setEditing(null);
-        setNewPassword("");
+        closeForm();
         load();
-        showMsg("User updated.");
+        toast.success(isAdd ? `${values.username} was created as ${values.role}.` : "Changes saved.");
       } else {
-        showMsg(data.detail || "Could not update user.", "error");
+        const data = await res.json().catch(() => ({}));
+        setFormError(responseErrorMessage(data, isAdd ? "Could not create user." : "Could not update user."));
       }
     } catch {
-      showMsg("Could not reach the API.", "error");
+      setFormError("Could not reach the API.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -77,15 +165,15 @@ export default function Users() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active: !u.active }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        load();
-        showMsg(`User '${u.username}' ${u.active ? "deactivated" : "activated"}.`);
-      } else {
-        showMsg(data.detail || "Could not update user.", "error");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast.error(responseErrorMessage(data, "Could not update user."));
+        return;
       }
+      load();
+      toast.success(`${u.username} was ${u.active ? "deactivated" : "activated"}.`);
     } catch {
-      showMsg("Could not reach the API.", "error");
+      toast.error("Could not reach the API.");
     }
   };
 
@@ -93,118 +181,84 @@ export default function Users() {
 
   return (
     <section>
-      <PageHeader eyebrow="Administration" title="Users" subtitle="Accounts and roles" />
-
-      {canWrite && (
-        <form onSubmit={addUser} className="card" style={{ marginBottom: 20 }}>
-          <div className="card-body">
-            <h3 className="section-title">Add New User</h3>
-            <div className="form-grid">
-              <div className="input-group">
-                <label className="input-label">Username *</label>
-                <input className="input" placeholder="jdoe" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} required />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Password * (min 12 characters)</label>
-                <input className="input" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={12} maxLength={72} autoComplete="new-password" />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Full Name</label>
-                <input className="input" placeholder="John Doe" value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Role *</label>
-                <select className="select" value={form.role} onChange={e => setForm({ ...form, role: e.target.value })}>
-                  {ROLES.map(r => <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>)}
-                </select>
-              </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button type="submit" className="btn btn-primary btn-sm">Add User</button>
-            </div>
-          </div>
-        </form>
-      )}
+      <PageHeader
+        eyebrow="Administration"
+        title="Users"
+        subtitle="Accounts and roles"
+        actions={canWrite && (
+          <button className="btn btn-primary btn-sm" onClick={openAdd}>Add User</button>
+        )}
+      />
 
       <div className="table-container" tabIndex={0} role="region" aria-label="Users">
         <table>
           <thead>
             <tr>
               <th>Username</th>
-              <th>Full Name</th>
+              <th>Full name</th>
               <th>Role</th>
               <th>Status</th>
               <th>Created</th>
-              <th style={{ textAlign: "right" }}>Actions</th>
+              {canWrite && <th style={{ textAlign: "right" }}>Actions</th>}
             </tr>
           </thead>
           <tbody>
-            {users.map(u => (
-              <tr key={u.id} style={{ opacity: u.active ? 1 : 0.5 }}>
-                <td>
-                  <div style={{ fontWeight: 600 }}>{u.username}</div>
-                  {u.id === me?.id && <span className="muted" style={{ fontSize: "0.75rem" }}>(you)</span>}
+            {users.length === 0 ? (
+              <tr>
+                <td colSpan={canWrite ? 6 : 5} className="empty-state">
+                  <div className="empty-state-text">No accounts yet</div>
                 </td>
-                <td style={{ color: "var(--text-secondary)" }}>{u.full_name || "-"}</td>
+              </tr>
+            ) : users.map(u => (
+              <tr key={u.id}>
                 <td>
-                  <span className={`badge ${u.role === "admin" ? "badge-danger" : u.role === "manager" ? "badge-info" : "badge-neutral"}`} style={{ textTransform: "capitalize" }}>
+                  <span className="sku" style={{ fontWeight: 600 }}>{u.username}</span>
+                  {u.id === me?.id && <span className="muted" style={{ fontSize: "0.75rem" }}> (you)</span>}
+                </td>
+                <td style={{ color: "var(--text-secondary)" }}>{u.full_name || "—"}</td>
+                <td>
+                  <span className={`badge ${u.role === "admin" ? "badge-danger" : u.role === "manager" ? "badge-info" : "badge-neutral"}`}>
                     {u.role}
                   </span>
                 </td>
                 <td>
-                  {u.active ? <span className="badge badge-success">Active</span> : <span className="badge badge-warning">Inactive</span>}
+                  {u.active
+                    ? <span className="badge badge-success">Active</span>
+                    : <span className="badge badge-neutral">Inactive</span>}
                 </td>
                 <td className="mono" style={{ color: "var(--text-secondary)", fontSize: "0.78rem", whiteSpace: "nowrap" }}>
                   {formatDate(u.created_at)}
                 </td>
-                <td style={{ textAlign: "right" }}>
-                  {canWrite && (
-                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      <button className="btn btn-ghost btn-xs" onClick={() => { setEditing({ ...u }); setNewPassword(""); }}>Edit</button>
+                {canWrite && (
+                  <td style={{ textAlign: "right" }}>
+                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <button className="btn btn-ghost btn-xs" onClick={() => openEdit(u)}>Edit</button>
                       {u.id !== me?.id && (
-                        <button className={`btn btn-xs ${u.active ? "btn-danger" : "btn-secondary"}`} onClick={() => toggleActive(u)}>
+                        <button
+                          className={`btn btn-xs ${u.active ? "btn-danger" : "btn-secondary"}`}
+                          onClick={() => toggleActive(u)}
+                        >
                           {u.active ? "Deactivate" : "Activate"}
                         </button>
                       )}
                     </div>
-                  )}
-                </td>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      <Dialog open={!!editing} onClose={() => setEditing(null)} title="Edit User">
-        {editing && (
-          <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <div className="input-group">
-                <label className="input-label">Username</label>
-                <input className="input" value={editing.username} disabled />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Full Name</label>
-                <input className="input" value={editing.full_name || ""} onChange={e => setEditing({ ...editing, full_name: e.target.value })} />
-              </div>
-              <div className="input-group">
-                <label className="input-label">Role</label>
-                <select className="select" value={editing.role} onChange={e => setEditing({ ...editing, role: e.target.value })}>
-                  {ROLES.map(r => <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>)}
-                </select>
-              </div>
-              <div className="input-group">
-                <label className="input-label">Reset Password (leave blank to keep current)</label>
-                <input className="input" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} minLength={12} maxLength={72} autoComplete="new-password" placeholder="New password (12+ characters)" />
-              </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setEditing(null)}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={saveUser}>Save Changes</button>
-            </div>
-          </div>
-        )}
-      </Dialog>
+      <UserFormDialog
+        form={form}
+        submitting={submitting}
+        error={formError}
+        onDismissError={() => setFormError(null)}
+        onClose={closeForm}
+        onChange={values => setForm(current => (current ? { ...current, values } : current))}
+        onSubmit={submitForm}
+      />
     </section>
   );
 }

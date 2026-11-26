@@ -31,6 +31,7 @@ datasets/m5/processed/m5_daily_sales.csv.gz
 datasets/m5/processed/m5_daily_sales.metadata.json
 datasets/m5/processed/m5_mapping.csv
 datasets/m5/processed/m5_mapping_50.csv
+datasets/m5/processed/m5_mapping_multistore.csv
 
 # Local tooling
 .DS_Store

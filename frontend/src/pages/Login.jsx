@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 import BrandMark from "../components/BrandMark";
+import InlineAlert from "../components/InlineAlert";
+import ThemeToggle from "../components/ThemeToggle";
 
 export default function Login() {
   const { login } = useAuth();
@@ -26,26 +28,25 @@ export default function Login() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
-      <div className="card" style={{ width: "100%", maxWidth: 400 }}>
-        <div className="card-body" style={{ padding: 32 }}>
-          <div className="app-brand" style={{ marginBottom: 24 }}>
-            <BrandMark size={42} />
-            <span className="brand-text">
-              <span className="wordmark" style={{ fontSize: "1.3rem" }}>
-                <span className="wordmark__nova">Nova</span><span className="wordmark__ledger">Ledger</span>
-              </span>
-              <span className="brand-sub">Sign in to continue</span>
-            </span>
-          </div>
+    <div className="login">
+      <header className="login__brand">
+        <BrandMark size={76} />
+        <p className="login__wordmark">
+          <span className="wordmark__nova">Nova</span><span className="wordmark__ledger">Ledger</span>
+        </p>
+        <p className="login__tagline">Warehouse management</p>
+        <div className="hazard-stripe login__edge" aria-hidden="true" />
+      </header>
 
-          {error && (
-            <div className="alert alert-error" role="alert" style={{ marginBottom: 16 }}>
-              <span>{error}</span>
-            </div>
-          )}
+      <main className="login__main">
+        <div className="login__theme"><ThemeToggle /></div>
+        <div className="login__box">
+          <h1 className="login__title">Sign in</h1>
+          <p className="login__hint">Use your NovaLedger username and password.</p>
 
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <InlineAlert style={{ marginBottom: 16 }}>{error}</InlineAlert>
+
+          <form onSubmit={handleSubmit} className="login__form">
             <div className="input-group">
               <label className="input-label" htmlFor="login-username">Username</label>
               <input
@@ -75,7 +76,7 @@ export default function Login() {
             </button>
           </form>
         </div>
-      </div>
+      </main>
     </div>
   );
 }
