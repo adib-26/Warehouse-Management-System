@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
-from database import get_db
+from database import get_db, is_transaction_failure, savepoint
 from config import UPLOAD_DIR
-from file_utils import read_upload, safe_filename, write_upload_file
+from dates import business_today, latest_local_today
+from file_utils import (
+    IMPORT_INTERRUPTED_DETAIL,
+    import_row_error,
+    iter_spreadsheet_rows,
+    read_upload,
+    safe_filename,
+    write_upload_file,
+)
+from import_lookups import find_import_party, lock_import_product
 from schemas import InboundCreate
 from security import require_permission, log_audit
 from typing import Optional
 from datetime import date, datetime
 from quantity import as_quantity, quantity_for_json
-import csv
-import io
 import os
 import uuid
 
@@ -22,19 +29,21 @@ def _cell_text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _import_date(value, row_number: int) -> str:
+def _import_date(value) -> str:
     if value is None or _cell_text(value) == "":
-        return date.today().isoformat()
+        return business_today().isoformat()
     if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    try:
-        return date.fromisoformat(_cell_text(value)).isoformat()
-    except ValueError as exc:
-        raise ValueError(
-            f"Row {row_number}: received_date must use YYYY-MM-DD"
-        ) from exc
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        try:
+            parsed = date.fromisoformat(_cell_text(value))
+        except ValueError as exc:
+            raise ValueError("received_date must use YYYY-MM-DD") from exc
+    if parsed > latest_local_today():
+        raise ValueError("received_date cannot be in the future")
+    return parsed.isoformat()
 
 
 @router.post("", status_code=201)
@@ -68,7 +77,12 @@ def create_inbound(
         if not supplier:
             raise HTTPException(status_code=404, detail="Supplier not found")
 
-        received_date = (ib.received_date or date.today()).isoformat()
+        if ib.received_date and ib.received_date > latest_local_today():
+            raise HTTPException(
+                status_code=422,
+                detail="received_date cannot be in the future",
+            )
+        received_date = (ib.received_date or business_today()).isoformat()
         cur.execute(
             """
             INSERT INTO inbound_shipments (product_id, supplier_id, quantity, invoice_ref, received_date, notes)
@@ -169,7 +183,7 @@ def list_inbound(
         JOIN products p ON p.id = ib.product_id
         JOIN suppliers s ON s.id = ib.supplier_id
         {where}
-        ORDER BY ib.created_at DESC LIMIT ? OFFSET ?
+        ORDER BY ib.created_at DESC, ib.id DESC LIMIT ? OFFSET ?
         """,
         params + [limit, offset],
     ).fetchall()
@@ -213,7 +227,7 @@ def list_shipment_attachments(shipment_id: int, user: dict = Depends(require_per
 
 
 @router.post("/{shipment_id}/attachments", status_code=201)
-async def upload_shipment_attachment(
+def upload_shipment_attachment(
     shipment_id: int,
     response: Response,
     file: UploadFile = File(...),
@@ -222,7 +236,7 @@ async def upload_shipment_attachment(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    content = await read_upload(file)
+    content = read_upload(file)
     original_name = safe_filename(file.filename)
     stored_name = uuid.uuid4().hex
 
@@ -270,141 +284,96 @@ async def upload_shipment_attachment(
 
 
 @router.post("/imports")
-async def import_inbound(file: UploadFile = File(...), user: dict = Depends(require_permission("inbound", "write"))):
-    ext = os.path.splitext(file.filename)[1].lower()
+def import_inbound(file: UploadFile = File(...), user: dict = Depends(require_permission("inbound", "write"))):
+    ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only CSV and XLSX files are supported")
 
-    content = await read_upload(file)
+    content = read_upload(file)
     conn = get_db()
-    conn.execute("BEGIN IMMEDIATE")
-    cur = conn.cursor()
     imported = 0
     errors = []
 
-    def process_row(row_data, row_num):
+    def process_row(cur, normalized, row_num):
         nonlocal imported
-        try:
-            normalized = {
-                _cell_text(key).lower(): value
-                for key, value in row_data.items()
-                if key is not None
-            }
-            product_name = _cell_text(normalized.get("product_name"))
-            product_sku = (
-                _cell_text(normalized.get("sku"))
-                or _cell_text(normalized.get("product_sku"))
+        product_name = _cell_text(normalized.get("product_name"))
+        product_sku = (
+            _cell_text(normalized.get("sku"))
+            or _cell_text(normalized.get("product_sku"))
+        )
+        supplier_name = _cell_text(normalized.get("supplier_name"))
+        quantity = as_quantity(normalized.get("quantity"), allow_zero=False)
+        invoice_ref = _cell_text(normalized.get("invoice_ref"))
+        received_date = _import_date(normalized.get("received_date"))
+        notes = _cell_text(normalized.get("notes"))
+
+        if not product_sku and not product_name:
+            errors.append(f"Row {row_num}: Missing product_name or sku")
+            return
+        if len(invoice_ref) > 128:
+            errors.append(f"Row {row_num}: invoice_ref is longer than 128 characters")
+            return
+
+        product = lock_import_product(cur, product_sku, product_name)
+        if not product:
+            errors.append(f"Row {row_num}: Product '{product_name or product_sku}' not found")
+            return
+
+        if product["batch_tracking_enabled_at"]:
+            errors.append(
+                f"Row {row_num}: Use the batch API to receive stock for '{product['name']}'"
             )
-            supplier_name = _cell_text(normalized.get("supplier_name"))
-            quantity = as_quantity(normalized.get("quantity"), allow_zero=False)
-            invoice_ref = _cell_text(normalized.get("invoice_ref"))
-            received_date = _import_date(normalized.get("received_date"), row_num)
-            notes = _cell_text(normalized.get("notes"))
+            return
 
-            if quantity <= 0:
-                errors.append(f"Row {row_num}: Quantity must be positive")
-                return
+        if not supplier_name:
+            errors.append(f"Row {row_num}: supplier_name is required")
+            return
+        supplier = find_import_party(cur, "suppliers", supplier_name)
+        if not supplier:
+            errors.append(f"Row {row_num}: Supplier '{supplier_name}' not found")
+            return
 
-            if product_sku:
-                product = cur.execute(
-                    "SELECT id, name, quantity, batch_tracking_enabled_at FROM products "
-                    "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
-                    (product_sku,),
-                ).fetchone()
-            elif product_name:
-                product = cur.execute(
-                    "SELECT id, name, quantity, batch_tracking_enabled_at FROM products "
-                    "WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
-                    (product_name.lower(),),
-                ).fetchone()
-            else:
-                errors.append(f"Row {row_num}: Missing product_name or sku")
-                return
+        with savepoint(cur, f"inbound_import_row_{row_num}"):
+            cur.execute(
+                """
+                INSERT INTO inbound_shipments
+                    (product_id, supplier_id, quantity, invoice_ref, received_date, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product["id"],
+                    supplier["id"],
+                    quantity,
+                    invoice_ref,
+                    received_date,
+                    notes,
+                ),
+            )
+            cur.execute(
+                "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') "
+                "WHERE id=? AND is_forecast_test=0",
+                (quantity, product["id"]),
+            )
+            cur.execute(
+                "INSERT INTO movements (product_id, action_type, delta, reason, source) "
+                "VALUES (?, 'STOCK_IN', ?, ?, 'inbound')",
+                (product["id"], quantity, f"Bulk inbound: {invoice_ref or 'no ref'}"),
+            )
 
-            if not product:
-                errors.append(f"Row {row_num}: Product '{product_name or product_sku}' not found")
-                return
-
-            if product["batch_tracking_enabled_at"]:
-                errors.append(
-                    f"Row {row_num}: Use the batch API to receive stock for '{product['name']}'"
-                )
-                return
-
-            supplier = cur.execute(
-                "SELECT id, name FROM suppliers WHERE LOWER(name)=? AND deleted=0",
-                (supplier_name.lower(),),
-            ).fetchone()
-
-            if not supplier:
-                errors.append(f"Row {row_num}: Supplier '{supplier_name}' not found")
-                return
-
-            savepoint = f"inbound_import_row_{row_num}"
-            cur.execute(f"SAVEPOINT {savepoint}")
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO inbound_shipments
-                        (product_id, supplier_id, quantity, invoice_ref, received_date, notes)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        product["id"],
-                        supplier["id"],
-                        quantity,
-                        invoice_ref,
-                        received_date,
-                        notes,
-                    ),
-                )
-                cur.execute(
-                    "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') "
-                    "WHERE id=? AND is_forecast_test=0",
-                    (quantity, product["id"]),
-                )
-                cur.execute(
-                    "INSERT INTO movements (product_id, action_type, delta, reason, source) "
-                    "VALUES (?, 'STOCK_IN', ?, ?, 'inbound')",
-                    (product["id"], quantity, f"Bulk inbound: {invoice_ref or 'no ref'}"),
-                )
-            except Exception:
-                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                raise
-            cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-
-            imported += 1
-        except Exception as e:
-            errors.append(f"Row {row_num}: {str(e)}")
+        imported += 1
 
     try:
-        if ext == ".csv":
-            reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
-            for i, row in enumerate(reader, start=2):
-                process_row(row, i)
-        elif ext == ".xlsx":
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
+        for row_num, normalized in iter_spreadsheet_rows(content, ext):
             try:
-                import openpyxl
-            except ImportError as exc:
-                raise HTTPException(
-                    status_code=500, detail="openpyxl is required for XLSX files"
-                ) from exc
-
-            wb = openpyxl.load_workbook(
-                io.BytesIO(content), read_only=True, data_only=True
-            )
-            try:
-                ws = wb.active
-                rows_iter = iter(ws.iter_rows(values_only=True))
-                headers = [
-                    _cell_text(header).lower()
-                    for header in next(rows_iter, [])
-                ]
-                for i, row in enumerate(rows_iter, start=2):
-                    process_row(dict(zip(headers, row)), i)
-            finally:
-                wb.close()
+                process_row(cur, normalized, row_num)
+            except Exception as exc:
+                # Deadlocks and lost connections discard the whole transaction;
+                # abort instead of committing whatever rows follow.
+                if is_transaction_failure(exc):
+                    raise
+                errors.append(f"Row {row_num}: {import_row_error(exc)}")
 
         log_audit(
             cur,
@@ -413,7 +382,7 @@ async def import_inbound(file: UploadFile = File(...), user: dict = Depends(requ
             "inbound",
             "file",
             None,
-            f"Imported {imported} inbound records from {file.filename}",
+            f"Imported {imported} inbound records from {safe_filename(file.filename or '')}",
         )
         conn.commit()
         return {
@@ -421,8 +390,10 @@ async def import_inbound(file: UploadFile = File(...), user: dict = Depends(requ
             "errors": errors[:20],
             "total_errors": len(errors),
         }
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if is_transaction_failure(exc):
+            raise HTTPException(status_code=409, detail=IMPORT_INTERRUPTED_DETAIL) from exc
         raise
     finally:
         conn.close()

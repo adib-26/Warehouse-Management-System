@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 import logging
 import math
+import threading
 import warnings
 
 
@@ -13,6 +14,11 @@ ARIMA_ORDER = (1, 1, 1)
 ARIMA_MIN_HISTORY_DAYS = 90
 ARIMA_MIN_NONZERO_DAYS = 10
 MAX_FORECAST_QUANTITY = 9_999_999_999.99
+
+# warnings.catch_warnings() swaps process-wide state. FastAPI runs requests in
+# worker threads, so two concurrent fits could record (or swallow) each
+# other's ConvergenceWarnings. Fits that capture warnings run one at a time.
+_ARIMA_FIT_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -108,7 +114,7 @@ def arima_forecast_with_fallback(
         raise RuntimeError("Statsmodels is required for ARIMA forecasting") from exc
 
     try:
-        with warnings.catch_warnings(record=True) as caught_warnings:
+        with _ARIMA_FIT_LOCK, warnings.catch_warnings(record=True) as caught_warnings:
             warnings.simplefilter("always", ConvergenceWarning)
             fitted = ARIMA(values, order=ARIMA_ORDER).fit()
 
@@ -217,7 +223,9 @@ def project_stockout(
     )
 
     stock = numeric_stock
-    stockout_date = as_of_date if stock <= 0 else None
+    # A stockout is the first day with unmet demand. Zero opening stock alone
+    # is not one: a day-one receipt or zero demand can still cover every day.
+    stockout_date = None
     unmet_demand_total = 0.0
     daily_projection = []
     total_demand = 0.0

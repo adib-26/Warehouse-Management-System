@@ -434,7 +434,7 @@ export default function Inbound() {
                       </div>
                       <div style={{ display: "flex", gap: 6 }}>
                         <button className="btn btn-ghost btn-xs" onClick={() => downloadAttachment(a.id, a.filename)}>Download</button>
-                        {can("inbound", "write") && (
+                        {can("inbound", "delete") && (
                           <button className="btn btn-danger btn-xs" onClick={() => deleteAttachment(a.id)}>Remove</button>
                         )}
                       </div>

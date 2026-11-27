@@ -3,23 +3,31 @@ from typing import Literal, Optional
 from datetime import date, datetime
 from decimal import Decimal
 
+# Free-text fields are MySQL TEXT columns (65,535 bytes). This limit fits even
+# when every character needs four UTF-8 bytes. Other limits match VARCHAR sizes.
+TEXT_MAX_LENGTH = 10_000
+
 
 class ProductCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     name: str = Field(min_length=1, max_length=200)
     sku: str = Field(min_length=1, max_length=100)
-    description: str = ""
-    category: str = ""
-    tags: str = ""
+    description: str = Field(default="", max_length=TEXT_MAX_LENGTH)
+    category: str = Field(default="", max_length=128)
+    tags: str = Field(default="", max_length=255)
     quantity: Decimal = Field(default=Decimal("0"), ge=0, max_digits=12, decimal_places=2)
     low_stock: Decimal = Field(default=Decimal("10"), ge=0, max_digits=12, decimal_places=2)
 
 
 class ProductUpdate(BaseModel):
-    name: Optional[str] = None
-    sku: Optional[str] = None
-    description: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[str] = None
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    sku: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=TEXT_MAX_LENGTH)
+    category: Optional[str] = Field(default=None, max_length=128)
+    tags: Optional[str] = Field(default=None, max_length=255)
     quantity: Optional[Decimal] = Field(default=None, ge=0, max_digits=12, decimal_places=2)
     low_stock: Optional[Decimal] = Field(default=None, ge=0, max_digits=12, decimal_places=2)
     archived: Optional[bool] = None
@@ -30,7 +38,7 @@ class MovementCreate(BaseModel):
 
     sku: str = Field(min_length=1, max_length=100)
     delta: Decimal = Field(max_digits=12, decimal_places=2)
-    reason: str = ""
+    reason: str = Field(default="", max_length=TEXT_MAX_LENGTH)
 
     @field_validator("delta")
     @classmethod
@@ -40,59 +48,67 @@ class MovementCreate(BaseModel):
         return value
 
 
-class SupplierCreate(BaseModel):
-    name: str
-    contact_person: str = ""
-    email: str = ""
-    phone: str = ""
-    address: str = ""
-    notes: str = ""
+class _PartyCreate(BaseModel):
+    """Fields shared by suppliers and customers."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    contact_person: str = Field(default="", max_length=255)
+    email: str = Field(default="", max_length=255)
+    phone: str = Field(default="", max_length=64)
+    address: str = Field(default="", max_length=TEXT_MAX_LENGTH)
+    notes: str = Field(default="", max_length=TEXT_MAX_LENGTH)
 
 
-class SupplierUpdate(BaseModel):
-    name: Optional[str] = None
-    contact_person: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    notes: Optional[str] = None
+class _PartyUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    contact_person: Optional[str] = Field(default=None, max_length=255)
+    email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=64)
+    address: Optional[str] = Field(default=None, max_length=TEXT_MAX_LENGTH)
+    notes: Optional[str] = Field(default=None, max_length=TEXT_MAX_LENGTH)
+
+
+class SupplierCreate(_PartyCreate):
+    pass
+
+
+class SupplierUpdate(_PartyUpdate):
+    pass
 
 
 class InboundCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     product_id: int
     supplier_id: int
     quantity: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    invoice_ref: str = ""
+    invoice_ref: str = Field(default="", max_length=128)
     received_date: Optional[date] = None
-    notes: str = ""
+    notes: str = Field(default="", max_length=TEXT_MAX_LENGTH)
 
 
-class CustomerCreate(BaseModel):
-    name: str
-    contact_person: str = ""
-    email: str = ""
-    phone: str = ""
-    address: str = ""
-    notes: str = ""
+class CustomerCreate(_PartyCreate):
+    pass
 
 
-class CustomerUpdate(BaseModel):
-    name: Optional[str] = None
-    contact_person: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    notes: Optional[str] = None
+class CustomerUpdate(_PartyUpdate):
+    pass
 
 
 class OutboundCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     product_id: int
     customer_id: int
     warehouse_id: int = Field(gt=0)
     quantity: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
-    so_ref: str = ""
+    so_ref: str = Field(default="", max_length=128)
     dispatch_date: Optional[date] = None
-    notes: str = ""
+    notes: str = Field(default="", max_length=TEXT_MAX_LENGTH)
 
 
 class InventoryBatchCreate(BaseModel):

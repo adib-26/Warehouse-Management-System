@@ -1339,7 +1339,7 @@ export default function Forecasting() {
                               <div>{row.warehouses.map(warehouse => warehouse.warehouse_code).join(", ")}</div>
                               <div className="muted" style={{ fontSize: "0.7rem" }}>Lead time {row.lead_time_days}d · safety {formatNumber(row.safety_stock)} · settings {row.reorder_settings_coverage.configured_warehouses}/{row.reorder_settings_coverage.total_warehouses}</div>
                             </td>
-                            <td>{formatNumber(row.available_stock)}<div className="muted" style={{ fontSize: "0.7rem" }}>{row.inventory_source === "simulated" ? "simulated" : "live product balance"} · avg {formatNumber(row.average_daily_demand)}/day</div></td>
+                            <td>{formatNumber(row.available_stock)}<div className="muted" style={{ fontSize: "0.7rem" }}>{row.inventory_source === "simulated" ? "simulated" : row.inventory_source === "available batch stock" ? "usable lot balance" : "live product balance"} · avg {formatNumber(row.average_daily_demand)}/day</div></td>
                             <td>{row.stockout_date ? <><div>{row.stockout_date}</div><div className="muted" style={{ fontSize: "0.75rem" }}>{row.days_remaining} days</div></> : <span className="muted">Beyond forecast window</span>}</td>
                             <td><span className={`badge ${stockoutRiskClass(row.risk)}`}>{row.risk}</span><div className="muted" style={{ fontSize: "0.7rem" }}>{row.reorder_required === null ? "Lead-time demand not covered" : row.reorder_required ? "Reorder now" : "Above reorder point"}</div></td>
                             <td>{formatNumber(row.reorder_point)}</td>

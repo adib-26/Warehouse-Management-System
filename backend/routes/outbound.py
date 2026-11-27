@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, UploadFile, File
-from database import get_db
+from database import get_db, is_transaction_failure, savepoint
 from config import UPLOAD_DIR
-from file_utils import read_upload, safe_filename, write_upload_file
+from dates import business_today, latest_local_today
+from file_utils import (
+    IMPORT_INTERRUPTED_DETAIL,
+    import_row_error,
+    iter_spreadsheet_rows,
+    read_upload,
+    safe_filename,
+    write_upload_file,
+)
+from import_lookups import find_import_party, lock_import_product
 from schemas import OutboundCreate
 from security import require_permission, log_audit
 from typing import Optional
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-import csv
-import io
 import os
 import uuid
 from routes.batches import allocate_outbound_shipment
@@ -33,19 +40,14 @@ def _display_quantity(value: Decimal):
     return int(value) if value == value.to_integral_value() else float(value)
 
 
-def _business_today() -> date:
-    """Use the same UTC business date configured for database connections."""
-    return datetime.now(timezone.utc).date()
-
-
 def _cell_text(value) -> str:
     """Normalize CSV and XLSX cells without turning blank cells into 'None'."""
     return "" if value is None else str(value).strip()
 
 
-def _import_date(value, row_number: int) -> str:
+def _import_date(value) -> str:
     if value is None or _cell_text(value) == "":
-        return _business_today().isoformat()
+        return business_today().isoformat()
     if isinstance(value, datetime):
         parsed = value.date()
     elif isinstance(value, date):
@@ -54,13 +56,9 @@ def _import_date(value, row_number: int) -> str:
         try:
             parsed = date.fromisoformat(_cell_text(value))
         except ValueError as exc:
-            raise ValueError(
-                f"Row {row_number}: dispatch_date must use YYYY-MM-DD"
-            ) from exc
-    if parsed > _business_today():
-        raise ValueError(
-            f"Row {row_number}: dispatch_date cannot be in the future"
-        )
+            raise ValueError("dispatch_date must use YYYY-MM-DD") from exc
+    if parsed > latest_local_today():
+        raise ValueError("dispatch_date cannot be in the future")
     return parsed.isoformat()
 
 
@@ -114,8 +112,8 @@ def create_outbound(
                 detail=f"Insufficient stock (available: {product['quantity']})",
             )
 
-        dispatch_day = ob.dispatch_date or _business_today()
-        if dispatch_day > _business_today():
+        dispatch_day = ob.dispatch_date or business_today()
+        if dispatch_day > latest_local_today():
             raise HTTPException(
                 status_code=422,
                 detail="dispatch_date cannot be in the future",
@@ -241,6 +239,9 @@ def list_outbound(
         params,
     ).fetchone()[0]
 
+    # Shipments created before a product's batch tracking started have already
+    # deducted product stock, and the allocator refuses them, so they never
+    # need batch allocation.
     rows = cur.execute(
         f"""
         SELECT ob.*, p.name AS product_name, p.sku AS product_sku,
@@ -248,10 +249,14 @@ def list_outbound(
                c.name AS customer_name,
                w.name AS warehouse_name, w.warehouse_code,
                COALESCE(a.allocated_quantity, 0) AS allocated_quantity,
-               GREATEST(0, ob.quantity-COALESCE(a.allocated_quantity, 0))
-                   AS remaining_to_allocate,
                CASE
-                   WHEN p.batch_tracking_enabled_at IS NULL THEN 'not_required'
+                   WHEN p.batch_tracking_enabled_at IS NULL
+                     OR ob.created_at < p.batch_tracking_enabled_at THEN 0
+                   ELSE GREATEST(0, ob.quantity-COALESCE(a.allocated_quantity, 0))
+               END AS remaining_to_allocate,
+               CASE
+                   WHEN p.batch_tracking_enabled_at IS NULL
+                     OR ob.created_at < p.batch_tracking_enabled_at THEN 'not_required'
                    WHEN COALESCE(a.allocated_quantity, 0) > ob.quantity THEN 'overallocated'
                    WHEN COALESCE(a.allocated_quantity, 0) = ob.quantity THEN 'allocated'
                    WHEN COALESCE(a.allocated_quantity, 0) > 0 THEN 'partial'
@@ -267,7 +272,7 @@ def list_outbound(
             GROUP BY outbound_id
         ) a ON a.outbound_id=ob.id
         {where}
-        ORDER BY ob.created_at DESC LIMIT ? OFFSET ?
+        ORDER BY ob.created_at DESC, ob.id DESC LIMIT ? OFFSET ?
         """,
         params + [limit, offset],
     ).fetchall()
@@ -311,7 +316,7 @@ def list_shipment_attachments(shipment_id: int, user: dict = Depends(require_per
 
 
 @router.post("/{shipment_id}/attachments", status_code=201)
-async def upload_shipment_attachment(
+def upload_shipment_attachment(
     shipment_id: int,
     response: Response,
     file: UploadFile = File(...),
@@ -320,7 +325,7 @@ async def upload_shipment_attachment(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    content = await read_upload(file)
+    content = read_upload(file)
     original_name = safe_filename(file.filename)
     stored_name = uuid.uuid4().hex
 
@@ -368,182 +373,141 @@ async def upload_shipment_attachment(
 
 
 @router.post("/imports")
-async def import_outbound(file: UploadFile = File(...), user: dict = Depends(require_permission("outbound", "write"))):
-    ext = os.path.splitext(file.filename)[1].lower()
+def import_outbound(file: UploadFile = File(...), user: dict = Depends(require_permission("outbound", "write"))):
+    ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only CSV and XLSX files are supported")
 
-    content = await read_upload(file)
+    content = read_upload(file)
     conn = get_db()
-    conn.execute("BEGIN IMMEDIATE")
-    cur = conn.cursor()
     imported = 0
     errors = []
     # Track quantities across rows so multiple rows for the same product
     # can't jointly dispatch more than is available.
     running_qty = {}
 
-    def process_row(row_data, row_num):
+    def process_row(cur, normalized, row_num):
         nonlocal imported
-        try:
-            normalized = {
-                _cell_text(key).lower(): value
-                for key, value in row_data.items()
-                if key is not None
-            }
-            product_name = _cell_text(normalized.get("product_name"))
-            product_sku = _cell_text(
-                normalized.get("sku", normalized.get("product_sku"))
+        product_name = _cell_text(normalized.get("product_name"))
+        product_sku = (
+            _cell_text(normalized.get("sku"))
+            or _cell_text(normalized.get("product_sku"))
+        )
+        customer_name = _cell_text(normalized.get("customer_name"))
+        quantity = _quantity_decimal(normalized.get("quantity"))
+        so_ref = _cell_text(normalized.get("so_ref"))
+        dispatch_date = _import_date(normalized.get("dispatch_date"))
+        notes = _cell_text(normalized.get("notes"))
+        warehouse_code = _cell_text(normalized.get("warehouse_code"))
+
+        if quantity <= 0:
+            errors.append(f"Row {row_num}: Quantity must be positive")
+            return
+        if not product_sku and not product_name:
+            errors.append(f"Row {row_num}: Missing product_name or sku")
+            return
+        if len(so_ref) > 128:
+            errors.append(f"Row {row_num}: so_ref is longer than 128 characters")
+            return
+
+        product = lock_import_product(cur, product_sku, product_name)
+        if not product:
+            errors.append(f"Row {row_num}: Product '{product_name or product_sku}' not found")
+            return
+
+        if not customer_name:
+            errors.append(f"Row {row_num}: customer_name is required")
+            return
+        customer = find_import_party(cur, "customers", customer_name)
+        if not customer:
+            errors.append(f"Row {row_num}: Customer '{customer_name}' not found")
+            return
+
+        if not warehouse_code:
+            errors.append(f"Row {row_num}: warehouse_code is required")
+            return
+        warehouse = cur.execute(
+            """
+            SELECT id FROM warehouses
+            WHERE warehouse_code=? AND active=1 AND is_forecast_test=0
+            """,
+            (warehouse_code,),
+        ).fetchone()
+        if not warehouse:
+            errors.append(f"Row {row_num}: Warehouse '{warehouse_code}' not found or inactive")
+            return
+        warehouse_id = warehouse["id"]
+
+        available = running_qty.get(product["id"], _quantity_decimal(product["quantity"]))
+        if quantity > available:
+            errors.append(
+                f"Row {row_num}: Insufficient stock for '{product['name']}' (available: {available})"
             )
-            customer_name = _cell_text(normalized.get("customer_name"))
-            quantity = _quantity_decimal(normalized.get("quantity"))
-            so_ref = _cell_text(normalized.get("so_ref"))
-            dispatch_date = _import_date(normalized.get("dispatch_date"), row_num)
-            notes = _cell_text(normalized.get("notes"))
-            warehouse_code = _cell_text(normalized.get("warehouse_code"))
+            return
 
-            if quantity <= 0:
-                errors.append(f"Row {row_num}: Quantity must be positive")
-                return
-
-            if product_sku:
-                product = cur.execute(
-                    """
-                    SELECT id, name, quantity, batch_tracking_enabled_at FROM products
-                    WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE
-                    """,
-                    (product_sku,),
-                ).fetchone()
-            elif product_name:
-                product = cur.execute(
-                    """
-                    SELECT id, name, quantity, batch_tracking_enabled_at FROM products
-                    WHERE LOWER(name)=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE
-                    """,
-                    (product_name.lower(),),
-                ).fetchone()
-            else:
-                errors.append(f"Row {row_num}: Missing product_name or sku")
-                return
-
-            if not product:
-                errors.append(f"Row {row_num}: Product '{product_name or product_sku}' not found")
-                return
-
-            customer = cur.execute(
-                "SELECT id, name FROM customers WHERE LOWER(name)=? AND deleted=0",
-                (customer_name.lower(),),
-            ).fetchone()
-
-            if not customer:
-                errors.append(f"Row {row_num}: Customer '{customer_name}' not found")
-                return
-
-            if not warehouse_code:
-                errors.append(f"Row {row_num}: warehouse_code is required")
-                return
-            warehouse = cur.execute(
+        with savepoint(cur, f"outbound_import_row_{row_num}"):
+            cur.execute(
                 """
-                SELECT id FROM warehouses
-                WHERE warehouse_code=? AND active=1 AND is_forecast_test=0
+                INSERT INTO outbound_shipments
+                    (product_id, customer_id, warehouse_id, quantity, so_ref, dispatch_date, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (warehouse_code,),
-            ).fetchone()
-            if not warehouse:
-                errors.append(f"Row {row_num}: Warehouse '{warehouse_code}' not found or inactive")
-                return
-            warehouse_id = warehouse["id"]
+                (product["id"], customer["id"], warehouse_id, quantity, so_ref, dispatch_date, notes),
+            )
+            shipment_id = int(cur.lastrowid)
 
-            available = running_qty.get(product["id"], _quantity_decimal(product["quantity"]))
-            if quantity > available:
-                errors.append(
-                    f"Row {row_num}: Insufficient stock for '{product['name']}' (available: {available})"
+            cur.execute(
+                """
+                INSERT INTO forecast_demand_history
+                    (product_id, warehouse_id, demand_date, quantity_sold, source)
+                VALUES (?, ?, ?, ?, 'WMS') AS incoming
+                ON DUPLICATE KEY UPDATE
+                    quantity_sold = forecast_demand_history.quantity_sold
+                                    + incoming.quantity_sold
+                """,
+                (product["id"], warehouse_id, dispatch_date, quantity),
+            )
+
+            if product["batch_tracking_enabled_at"]:
+                allocate_outbound_shipment(
+                    cur,
+                    shipment_id,
+                    "AUTO",
                 )
-                return
-
-            savepoint = f"outbound_import_row_{row_num}"
-            cur.execute(f"SAVEPOINT {savepoint}")
-            try:
+            else:
                 cur.execute(
                     """
-                    INSERT INTO outbound_shipments
-                        (product_id, customer_id, warehouse_id, quantity, so_ref, dispatch_date, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    UPDATE products
+                    SET quantity=quantity - ?, updated_at=UTC_TIMESTAMP()
+                    WHERE id=? AND is_forecast_test=0 AND quantity >= ?
                     """,
-                    (product["id"], customer["id"], warehouse_id, quantity, so_ref, dispatch_date, notes),
+                    (quantity, product["id"], quantity),
                 )
-                shipment_id = int(cur.lastrowid)
+                if cur.rowcount != 1:
+                    raise ValueError(
+                        f"Insufficient stock for '{product['name']}' due to a concurrent update"
+                    )
 
                 cur.execute(
-                    """
-                    INSERT INTO forecast_demand_history
-                        (product_id, warehouse_id, demand_date, quantity_sold, source)
-                    VALUES (?, ?, ?, ?, 'WMS') AS incoming
-                    ON DUPLICATE KEY UPDATE
-                        quantity_sold = forecast_demand_history.quantity_sold
-                                        + incoming.quantity_sold
-                    """,
-                    (product["id"], warehouse_id, dispatch_date, quantity),
+                    "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
+                    (product["id"], -quantity, f"Bulk outbound: {so_ref or 'no ref'}"),
                 )
 
-                if product["batch_tracking_enabled_at"]:
-                    allocate_outbound_shipment(
-                        cur,
-                        shipment_id,
-                        "AUTO",
-                    )
-                else:
-                    cur.execute(
-                        """
-                        UPDATE products
-                        SET quantity=quantity - ?, updated_at=UTC_TIMESTAMP()
-                        WHERE id=? AND is_forecast_test=0 AND quantity >= ?
-                        """,
-                        (quantity, product["id"], quantity),
-                    )
-                    if cur.rowcount != 1:
-                        raise ValueError(
-                            f"Insufficient stock for '{product['name']}' due to a concurrent update"
-                        )
-
-                    cur.execute(
-                        "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, 'STOCK_OUT', ?, ?, 'outbound')",
-                        (product["id"], -quantity, f"Bulk outbound: {so_ref or 'no ref'}"),
-                    )
-            except Exception:
-                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                raise
-            cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-
-            running_qty[product["id"]] = available - quantity
-
-            imported += 1
-        except Exception as e:
-            errors.append(f"Row {row_num}: {str(e)}")
+        running_qty[product["id"]] = available - quantity
+        imported += 1
 
     try:
-        if ext == ".csv":
-            reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
-            for i, row in enumerate(reader, start=2):
-                process_row(row, i)
-        elif ext == ".xlsx":
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
+        for row_num, normalized in iter_spreadsheet_rows(content, ext):
             try:
-                import openpyxl
-            except ImportError as exc:
-                raise HTTPException(
-                    status_code=500, detail="openpyxl is required for XLSX files"
-                ) from exc
-
-            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-            try:
-                ws = wb.active
-                rows_iter = iter(ws.iter_rows(values_only=True))
-                headers = [_cell_text(header).lower() for header in next(rows_iter, [])]
-                for i, row in enumerate(rows_iter, start=2):
-                    process_row(dict(zip(headers, row)), i)
-            finally:
-                wb.close()
+                process_row(cur, normalized, row_num)
+            except Exception as exc:
+                # Deadlocks and lost connections discard the whole transaction;
+                # abort instead of committing whatever rows follow.
+                if is_transaction_failure(exc):
+                    raise
+                errors.append(f"Row {row_num}: {import_row_error(exc)}")
 
         log_audit(
             cur,
@@ -552,7 +516,7 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
             "outbound",
             "file",
             None,
-            f"Imported {imported} outbound records from {file.filename}",
+            f"Imported {imported} outbound records from {safe_filename(file.filename or '')}",
         )
         conn.commit()
         return {
@@ -560,8 +524,10 @@ async def import_outbound(file: UploadFile = File(...), user: dict = Depends(req
             "errors": errors[:20],
             "total_errors": len(errors),
         }
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if is_transaction_failure(exc):
+            raise HTTPException(status_code=409, detail=IMPORT_INTERRUPTED_DETAIL) from exc
         raise
     finally:
         conn.close()

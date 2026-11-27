@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import unquote, urlparse
@@ -179,6 +180,76 @@ def get_db():
     except pymysql.MySQLError as exc:
         raise DatabaseError(str(exc)) from exc
     return Connection(raw)
+
+
+# Deadlocks (1213) roll back the whole transaction. Lock-wait timeouts (1205)
+# and client errors such as a lost connection (2000+) leave it unusable too.
+_TRANSACTION_FAILURE_CODES = {1205, 1213}
+
+
+def is_transaction_failure(exc: Exception) -> bool:
+    """True when MySQL has rolled back or lost the current transaction.
+
+    Row-by-row imports must stop on these errors instead of recording a row
+    error and continuing, which would commit only part of the file.
+    """
+    if not isinstance(exc, pymysql.err.OperationalError):
+        return False
+    code = exc.args[0] if exc.args else None
+    return isinstance(code, int) and (code in _TRANSACTION_FAILURE_CODES or code >= 2000)
+
+
+@contextmanager
+def savepoint(cur, name: str):
+    """Undo only the enclosed statements when they fail.
+
+    ``name`` must be a trusted identifier (callers build it from row numbers).
+    After a transaction failure the savepoint no longer exists, so it is not
+    rolled back here; the caller is expected to abort the whole transaction.
+    """
+    cur.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except Exception as exc:
+        if not is_transaction_failure(exc):
+            cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            cur.execute(f"RELEASE SAVEPOINT {name}")
+        raise
+    cur.execute(f"RELEASE SAVEPOINT {name}")
+
+
+FORECAST_RUN_LOCK_PREFIX = "novaledger_forecast_run_"
+
+
+def forecast_run_lock_name(run_id: int) -> str:
+    """Named lock held by the connection that is computing a forecast run."""
+    return f"{FORECAST_RUN_LOCK_PREFIX}{int(run_id)}"
+
+
+def recover_interrupted_forecast_runs(cur) -> int:
+    """Mark runs whose worker died (crash, restart) as failed.
+
+    Every run holds a MySQL named lock on its own connection while it works,
+    and MySQL releases that lock when the connection ends. A 'running' run
+    with no lock holder can therefore never finish. Runs owned by another live
+    API process keep their lock and are left alone.
+    """
+    rows = cur.execute(
+        "SELECT id, IS_USED_LOCK(CONCAT(?, id)) AS owner "
+        "FROM forecast_runs WHERE status='running'",
+        (FORECAST_RUN_LOCK_PREFIX,),
+    ).fetchall()
+    orphaned = [int(row["id"]) for row in rows if row["owner"] is None]
+    if not orphaned:
+        return 0
+    placeholders = ", ".join("?" for _ in orphaned)
+    cur.execute(
+        "UPDATE forecast_runs SET status='failed', completed_at=UTC_TIMESTAMP(), "
+        "error_message=? "
+        f"WHERE status='running' AND id IN ({placeholders})",
+        ["The run was interrupted before it finished. Start it again.", *orphaned],
+    )
+    return len(orphaned)
 
 
 def _schema_version(cur) -> int:
@@ -1166,6 +1237,14 @@ def _create_schema(cur):
 
 
 def _truncate_for_tests(cur):
+    # APP_ENV=test empties every table, including users and the audit log, on
+    # each startup. Refuse to do that to anything but a dedicated test schema.
+    database_name = cur.execute("SELECT DATABASE() AS name").fetchone()["name"] or ""
+    if not database_name.endswith("_test"):
+        raise RuntimeError(
+            "APP_ENV=test resets all data on startup, so it only runs against a "
+            f"database whose name ends in _test (connected to {database_name!r})."
+        )
     cur.execute("SET FOREIGN_KEY_CHECKS = 0")
     for table in DATA_TABLES:
         cur.execute(f"TRUNCATE TABLE {table}")
@@ -1207,6 +1286,7 @@ def init_db():
         if APP_ENV == "test":
             _truncate_for_tests(cur)
         seed_auth(cur)
+        recover_interrupted_forecast_runs(cur)
         conn.commit()
     except Exception:
         conn.rollback()

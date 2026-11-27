@@ -27,7 +27,7 @@ def list_customers(
 
     total = cur.execute(f"SELECT COUNT(*) FROM customers {where}", params).fetchone()[0]
     rows = cur.execute(
-        f"SELECT * FROM customers {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM customers {where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
     conn.close()
@@ -57,21 +57,25 @@ def create_customer(
     user: dict = Depends(require_permission("customers", "write")),
 ):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO customers (name, contact_person, email, phone, address, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (c.name, c.contact_person, c.email, c.phone, c.address, c.notes),
+        )
+        customer_id = cur.lastrowid
+        log_audit(cur, user, "CREATE", "customers", "customer", customer_id, f"Created customer '{c.name}'")
+        conn.commit()
 
-    cur.execute(
-        """
-        INSERT INTO customers (name, contact_person, email, phone, address, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (c.name, c.contact_person, c.email, c.phone, c.address, c.notes),
-    )
-    customer_id = cur.lastrowid
-    log_audit(cur, user, "CREATE", "customers", "customer", customer_id, f"Created customer '{c.name}'")
-    conn.commit()
-
-    row = cur.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
-    conn.close()
+        row = cur.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     response.headers["Location"] = f"/v1/customers/{customer_id}"
     return dict(row)
@@ -80,53 +84,58 @@ def create_customer(
 @router.patch("/{customer_id}")
 def update_customer(customer_id: int, c: CustomerUpdate, user: dict = Depends(require_permission("customers", "write"))):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT * FROM customers WHERE id=? AND deleted=0", (customer_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Customer not found")
 
-    existing = cur.execute(
-        "SELECT * FROM customers WHERE id=? AND deleted=0", (customer_id,)
-    ).fetchone()
-    if not existing:
+        fields = {k: v for k, v in c.model_dump(exclude_unset=True).items() if v is not None}
+
+        if not fields:
+            return dict(existing)
+
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        values = list(fields.values())
+
+        cur.execute(
+            f"UPDATE customers SET {set_clause}, updated_at=datetime('now') WHERE id=?",
+            values + [customer_id],
+        )
+        log_audit(cur, user, "UPDATE", "customers", "customer", customer_id, f"Updated fields: {', '.join(fields)}")
+        conn.commit()
+
+        row = cur.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    fields = {k: v for k, v in c.model_dump(exclude_unset=True).items() if v is not None}
-
-    if not fields:
-        conn.close()
-        return dict(existing)
-
-    set_clause = ", ".join(f"{k}=?" for k in fields)
-    values = list(fields.values())
-
-    cur.execute(
-        f"UPDATE customers SET {set_clause}, updated_at=datetime('now') WHERE id=?",
-        values + [customer_id],
-    )
-    log_audit(cur, user, "UPDATE", "customers", "customer", customer_id, f"Updated fields: {', '.join(fields)}")
-    conn.commit()
-
-    row = cur.execute("SELECT * FROM customers WHERE id=?", (customer_id,)).fetchone()
-    conn.close()
     return dict(row)
 
 
 @router.delete("/{customer_id}", status_code=204)
 def delete_customer(customer_id: int, user: dict = Depends(require_permission("customers", "delete"))):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT * FROM customers WHERE id=? AND deleted=0", (customer_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Customer not found")
 
-    existing = cur.execute(
-        "SELECT * FROM customers WHERE id=? AND deleted=0", (customer_id,)
-    ).fetchone()
-    if not existing:
+        cur.execute(
+            "UPDATE customers SET deleted=1, updated_at=datetime('now') WHERE id=?",
+            (customer_id,),
+        )
+        log_audit(cur, user, "DELETE", "customers", "customer", customer_id, f"Deleted customer '{existing['name']}'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    cur.execute(
-        "UPDATE customers SET deleted=1, updated_at=datetime('now') WHERE id=?",
-        (customer_id,),
-    )
-    log_audit(cur, user, "DELETE", "customers", "customer", customer_id, f"Deleted customer '{existing['name']}'")
-    conn.commit()
-    conn.close()
     return Response(status_code=204)

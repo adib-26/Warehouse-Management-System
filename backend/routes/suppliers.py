@@ -27,7 +27,7 @@ def list_suppliers(
 
     total = cur.execute(f"SELECT COUNT(*) FROM suppliers {where}", params).fetchone()[0]
     rows = cur.execute(
-        f"SELECT * FROM suppliers {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM suppliers {where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
     conn.close()
@@ -57,21 +57,25 @@ def create_supplier(
     user: dict = Depends(require_permission("suppliers", "write")),
 ):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO suppliers (name, contact_person, email, phone, address, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (s.name, s.contact_person, s.email, s.phone, s.address, s.notes),
+        )
+        supplier_id = cur.lastrowid
+        log_audit(cur, user, "CREATE", "suppliers", "supplier", supplier_id, f"Created supplier '{s.name}'")
+        conn.commit()
 
-    cur.execute(
-        """
-        INSERT INTO suppliers (name, contact_person, email, phone, address, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (s.name, s.contact_person, s.email, s.phone, s.address, s.notes),
-    )
-    supplier_id = cur.lastrowid
-    log_audit(cur, user, "CREATE", "suppliers", "supplier", supplier_id, f"Created supplier '{s.name}'")
-    conn.commit()
-
-    row = cur.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
-    conn.close()
+        row = cur.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     response.headers["Location"] = f"/v1/suppliers/{supplier_id}"
     return dict(row)
@@ -80,53 +84,58 @@ def create_supplier(
 @router.patch("/{supplier_id}")
 def update_supplier(supplier_id: int, s: SupplierUpdate, user: dict = Depends(require_permission("suppliers", "write"))):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT * FROM suppliers WHERE id=? AND deleted=0", (supplier_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Supplier not found")
 
-    existing = cur.execute(
-        "SELECT * FROM suppliers WHERE id=? AND deleted=0", (supplier_id,)
-    ).fetchone()
-    if not existing:
+        fields = {k: v for k, v in s.model_dump(exclude_unset=True).items() if v is not None}
+
+        if not fields:
+            return dict(existing)
+
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        values = list(fields.values())
+
+        cur.execute(
+            f"UPDATE suppliers SET {set_clause}, updated_at=datetime('now') WHERE id=?",
+            values + [supplier_id],
+        )
+        log_audit(cur, user, "UPDATE", "suppliers", "supplier", supplier_id, f"Updated fields: {', '.join(fields)}")
+        conn.commit()
+
+        row = cur.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Supplier not found")
-
-    fields = {k: v for k, v in s.model_dump(exclude_unset=True).items() if v is not None}
-
-    if not fields:
-        conn.close()
-        return dict(existing)
-
-    set_clause = ", ".join(f"{k}=?" for k in fields)
-    values = list(fields.values())
-
-    cur.execute(
-        f"UPDATE suppliers SET {set_clause}, updated_at=datetime('now') WHERE id=?",
-        values + [supplier_id],
-    )
-    log_audit(cur, user, "UPDATE", "suppliers", "supplier", supplier_id, f"Updated fields: {', '.join(fields)}")
-    conn.commit()
-
-    row = cur.execute("SELECT * FROM suppliers WHERE id=?", (supplier_id,)).fetchone()
-    conn.close()
     return dict(row)
 
 
 @router.delete("/{supplier_id}", status_code=204)
 def delete_supplier(supplier_id: int, user: dict = Depends(require_permission("suppliers", "delete"))):
     conn = get_db()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT * FROM suppliers WHERE id=? AND deleted=0", (supplier_id,)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Supplier not found")
 
-    existing = cur.execute(
-        "SELECT * FROM suppliers WHERE id=? AND deleted=0", (supplier_id,)
-    ).fetchone()
-    if not existing:
+        cur.execute(
+            "UPDATE suppliers SET deleted=1, updated_at=datetime('now') WHERE id=?",
+            (supplier_id,),
+        )
+        log_audit(cur, user, "DELETE", "suppliers", "supplier", supplier_id, f"Deleted supplier '{existing['name']}'")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=404, detail="Supplier not found")
-
-    cur.execute(
-        "UPDATE suppliers SET deleted=1, updated_at=datetime('now') WHERE id=?",
-        (supplier_id,),
-    )
-    log_audit(cur, user, "DELETE", "suppliers", "supplier", supplier_id, f"Deleted supplier '{existing['name']}'")
-    conn.commit()
-    conn.close()
     return Response(status_code=204)

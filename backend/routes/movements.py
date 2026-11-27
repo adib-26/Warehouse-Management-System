@@ -64,59 +64,61 @@ def create_movement(
     user: dict = Depends(require_permission("stock", "write")),
 ):
     conn = get_db()
-    conn.execute("BEGIN IMMEDIATE")
-    cur = conn.cursor()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
 
-    product = cur.execute(
-        "SELECT id, quantity, name, batch_tracking_enabled_at FROM products "
-        "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
-        (m.sku,),
-    ).fetchone()
+        product = cur.execute(
+            "SELECT id, quantity, low_stock, name, batch_tracking_enabled_at FROM products "
+            "WHERE sku=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
+            (m.sku,),
+        ).fetchone()
 
-    if not product:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Product not found")
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
 
-    if product["batch_tracking_enabled_at"]:
-        conn.close()
-        raise HTTPException(
-            status_code=409,
-            detail="Batch-tracked stock can only be changed through inventory batches.",
+        if product["batch_tracking_enabled_at"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Batch-tracked stock can only be changed through inventory batches.",
+            )
+
+        new_qty = Decimal(str(product["quantity"])) + m.delta
+        if new_qty < 0:
+            raise HTTPException(status_code=400, detail="Insufficient stock")
+
+        action_type = "STOCK_IN" if m.delta > 0 else "STOCK_OUT"
+
+        cur.execute(
+            "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') "
+            "WHERE id=? AND is_forecast_test=0 AND quantity + ? >= 0",
+            (m.delta, product["id"], m.delta),
         )
+        if cur.rowcount != 1:
+            raise HTTPException(status_code=400, detail="Insufficient stock")
 
-    new_qty = Decimal(str(product["quantity"])) + m.delta
-    if new_qty < 0:
+        cur.execute(
+            "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, ?, ?, ?, 'manual')",
+            (product["id"], action_type, m.delta, m.reason),
+        )
+        movement_id = cur.lastrowid
+
+        log_audit(cur, user, action_type, "stock", "product", product["id"], f"Adjusted '{product['name']}' by {m.delta:+.2f} ({m.reason or 'no reason'})")
+        conn.commit()
+
+        row = cur.execute("SELECT * FROM movements WHERE id=?", (movement_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(status_code=400, detail="Insufficient stock")
-
-    action_type = "STOCK_IN" if m.delta > 0 else "STOCK_OUT"
-
-    cur.execute(
-        "UPDATE products SET quantity=quantity + ?, updated_at=datetime('now') "
-        "WHERE id=? AND is_forecast_test=0 AND quantity + ? >= 0",
-        (m.delta, product["id"], m.delta),
-    )
-    if cur.rowcount != 1:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Insufficient stock")
-
-    cur.execute(
-        "INSERT INTO movements (product_id, action_type, delta, reason, source) VALUES (?, ?, ?, ?, 'manual')",
-        (product["id"], action_type, m.delta, m.reason),
-    )
-    movement_id = cur.lastrowid
-
-    log_audit(cur, user, action_type, "stock", "product", product["id"], f"Adjusted '{product['name']}' by {m.delta:+.2f} ({m.reason or 'no reason'})")
-    conn.commit()
-
-    row = cur.execute("SELECT * FROM movements WHERE id=?", (movement_id,)).fetchone()
-    conn.close()
 
     resource = dict(row)
     resource["product_name"] = product["name"]
     resource["sku"] = m.sku
     resource["quantity_after"] = int(new_qty) if new_qty == new_qty.to_integral_value() else float(new_qty)
-    resource["low_stock_warning"] = new_qty <= 0
+    # Same rule as the low-stock filter and dashboard: at or below the threshold.
+    resource["low_stock_warning"] = new_qty <= Decimal(str(product["low_stock"]))
 
     response.headers["Location"] = f"/v1/movements/{movement_id}"
     return resource
@@ -125,54 +127,60 @@ def create_movement(
 @router.delete("/{movement_id}", status_code=204)
 def delete_movement(movement_id: int, user: dict = Depends(require_permission("stock", "write"))):
     conn = get_db()
-    conn.execute("BEGIN IMMEDIATE")
-    cur = conn.cursor()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.cursor()
 
-    movement = cur.execute(
-        "SELECT id, product_id, delta, source FROM movements WHERE id=? FOR UPDATE",
-        (movement_id,),
-    ).fetchone()
+        movement = cur.execute(
+            "SELECT id, product_id, delta, source FROM movements WHERE id=? FOR UPDATE",
+            (movement_id,),
+        ).fetchone()
 
-    if not movement:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Movement not found")
+        if not movement:
+            raise HTTPException(status_code=404, detail="Movement not found")
 
-    if movement["source"] != "manual":
-        conn.close()
-        raise HTTPException(
-            status_code=409,
-            detail="Only standalone manual stock adjustments can be undone",
+        if movement["source"] != "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="Only standalone manual stock adjustments can be undone",
+            )
+
+        # Match create_movement: deleted and archived products cannot change stock.
+        product = cur.execute(
+            "SELECT quantity, batch_tracking_enabled_at FROM products "
+            "WHERE id=? AND deleted=0 AND archived=0 AND is_forecast_test=0 FOR UPDATE",
+            (movement["product_id"],),
+        ).fetchone()
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="The product for this movement no longer exists or is archived",
+            )
+        if product["batch_tracking_enabled_at"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Manual movements cannot be reversed after batch tracking is enabled.",
+            )
+        if Decimal(str(product["quantity"])) - Decimal(str(movement["delta"])) < 0:
+            raise HTTPException(status_code=409, detail="Reversing this movement would make stock negative")
+
+        cur.execute(
+            "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') "
+            "WHERE id=? AND is_forecast_test=0 AND quantity - ? >= 0",
+            (movement["delta"], movement["product_id"], movement["delta"]),
         )
+        if cur.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Stock changed; refresh and try again")
 
-    product = cur.execute(
-        "SELECT quantity, batch_tracking_enabled_at FROM products "
-        "WHERE id=? AND is_forecast_test=0 FOR UPDATE",
-        (movement["product_id"],),
-    ).fetchone()
-    if product and product["batch_tracking_enabled_at"]:
+        cur.execute("DELETE FROM movements WHERE id=?", (movement_id,))
+
+        log_audit(cur, user, "UNDO", "stock", "movement", movement_id, f"Reversed movement {movement_id} (delta {movement['delta']:+.2f})")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         conn.close()
-        raise HTTPException(
-            status_code=409,
-            detail="Manual movements cannot be reversed after batch tracking is enabled.",
-        )
-    if not product or Decimal(str(product["quantity"])) - Decimal(str(movement["delta"])) < 0:
-        conn.close()
-        raise HTTPException(status_code=409, detail="Reversing this movement would make stock negative")
-
-    cur.execute(
-        "UPDATE products SET quantity = quantity - ?, updated_at=datetime('now') "
-        "WHERE id=? AND is_forecast_test=0 AND quantity - ? >= 0",
-        (movement["delta"], movement["product_id"], movement["delta"]),
-    )
-    if cur.rowcount != 1:
-        conn.close()
-        raise HTTPException(status_code=409, detail="Stock changed; refresh and try again")
-
-    cur.execute("DELETE FROM movements WHERE id=?", (movement_id,))
-
-    log_audit(cur, user, "UNDO", "stock", "movement", movement_id, f"Reversed movement {movement_id} (delta {movement['delta']:+.2f})")
-    conn.commit()
-    conn.close()
     return Response(status_code=204)
 
 

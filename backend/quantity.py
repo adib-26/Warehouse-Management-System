@@ -4,6 +4,8 @@ from decimal import Decimal, InvalidOperation
 
 
 CENT = Decimal("0.01")
+# Inventory columns are DECIMAL(12,2).
+MAX_QUANTITY = Decimal("9999999999.99")
 
 
 def as_quantity(value, *, allow_zero: bool = True) -> Decimal:
@@ -14,6 +16,8 @@ def as_quantity(value, *, allow_zero: bool = True) -> Decimal:
     if not quantity.is_finite() or quantity != quantity.quantize(CENT):
         raise ValueError("Quantity must be a finite number with at most two decimal places")
     quantity = quantity.quantize(CENT)
+    if quantity > MAX_QUANTITY:
+        raise ValueError(f"Quantity cannot exceed {MAX_QUANTITY}")
     if not allow_zero and quantity <= 0:
         raise ValueError("Quantity must be greater than zero")
     if allow_zero and quantity < 0:

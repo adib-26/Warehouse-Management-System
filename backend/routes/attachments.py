@@ -81,7 +81,9 @@ def delete_attachment(attachment_id: int, user: dict = Depends(get_current_user)
         attachment = dict(row)
         if not _is_operational_attachment(cur, attachment):
             raise HTTPException(status_code=404, detail="Attachment not found")
-        check_permission(user, entity_module(attachment["entity_type"]), "write")
+        # Removing a shipment document is a deletion, so it needs the module's
+        # delete permission (managers and operators lack it by default).
+        check_permission(user, entity_module(attachment["entity_type"]), "delete")
         file_path = UPLOAD_DIR / attachment["stored_name"]
         try:
             staged_path = stage_file_deletion(file_path)

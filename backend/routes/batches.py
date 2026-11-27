@@ -812,14 +812,18 @@ def update_batch(
             raise HTTPException(status_code=422, detail=f"{field_name} cannot be null")
     conn = get_db()
     try:
-        conn.execute("START TRANSACTION")
         cur = conn.cursor()
+        # Resolve the product before START TRANSACTION. Under REPEATABLE READ a
+        # transaction's snapshot comes from its first plain read; taking it
+        # here, before the product lock, would hide allocations committed while
+        # this request waited for that lock. START TRANSACTION discards it.
         identity = cur.execute(
             "SELECT product_id FROM inventory_batches WHERE id=?",
             (batch_id,),
         ).fetchone()
         if identity is None:
             raise HTTPException(status_code=404, detail="Batch not found")
+        conn.execute("START TRANSACTION")
         product = cur.execute(
             "SELECT id, quantity, is_forecast_test, batch_tracking_enabled_at "
             "FROM products WHERE id=? FOR UPDATE",

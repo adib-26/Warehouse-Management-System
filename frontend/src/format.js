@@ -119,6 +119,7 @@ const ACTION_META = {
   BULK_IMPORT:  { cls: "badge-warning", label: "Bulk Import" },
   UPLOAD:       { cls: "badge-info",    label: "Upload" },
   LOGIN:        { cls: "badge-info",    label: "Login" },
+  LOGIN_FAILED: { cls: "badge-danger",  label: "Login failed" },
 };
 
 /** Badge class and readable label for a movement or audit action code. */

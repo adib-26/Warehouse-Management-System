@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { API, authFetch, getToken, setToken } from "./api";
+import { responseErrorMessage } from "./format";
 
 const AuthContext = createContext(null);
 
@@ -30,8 +31,12 @@ export function AuthProvider({ children }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Login failed");
+    if (res.status === 429) {
+      throw new Error("Too many sign-in attempts. Wait a minute, then try again.");
+    }
+    // The proxy can answer with HTML (for example 502 while the API restarts).
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(responseErrorMessage(data, "Login failed"));
     setToken(data.token);
     setUser(data.user);
     setPermissions(data.permissions);

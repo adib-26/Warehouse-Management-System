@@ -149,6 +149,15 @@ The frontend authenticates users through the backend using JWT. Every protected 
 | Manager  | Read and write access to operational modules without delete privileges |
 | Operator | Inventory operations with read-only access to selected modules         |
 
+Deleting a product, supplier, customer, or shipment attachment requires the
+module's `delete` permission. Write access to the Administration module can be
+delegated to another role, but a delegated user can only manage accounts and
+assign roles that have no more access than their own role. Only
+administrators can change the admin role, their own role's permissions, or
+grant a permission they lack. The audit report at `/v1/audit-logs` shows
+sign-in history and user or permission changes only to users who can read the
+Administration module.
+
 Development administrator credentials:
 
 ```text
@@ -229,7 +238,7 @@ docker compose exec -T mysql sh -c 'exec mysqldump -unovaledger -p"$MYSQL_PASSWO
 Future schema changes belong in numbered migration functions in
 `backend/database.py`. Increment `SCHEMA_VERSION`, register the function in
 `SCHEMA_MIGRATIONS`, and do not edit a migration that existing installations
-have already applied. The current application schema version is 10.
+have already applied. The current application schema version is 11.
 
 ### Production deployment notes
 
@@ -237,6 +246,16 @@ For an internet-facing deployment, keep the Compose ports loopback-only and
 place a TLS-terminating reverse proxy (such as Caddy, Traefik, or a managed
 load balancer) in front of the frontend. Serve HTTPS before exposing the app;
 do not publish the backend directly. Enable HSTS only at that HTTPS boundary.
+
+The bundled Nginx limits `POST /v1/auth/login` to a burst of 20 attempts per
+client address, then one every 3 seconds; extra attempts receive HTTP 429.
+Failed sign-ins are recorded in the audit log as `LOGIN_FAILED`. If another
+reverse proxy forwards traffic to this Nginx, configure `set_real_ip_from` and
+`real_ip_header` in `frontend/nginx.conf`; otherwise every user shares the
+proxy's address and therefore one limit.
+
+`APP_ENV=test` empties every table on startup, so the API refuses to start in
+test mode unless the database name ends in `_test`.
 
 The application database is MySQL Community Edition. Point every backend instance at the same `DATABASE_URL` and `DATABASE_PASSWORD` before running more than one API process. Do not share one MySQL data volume across hosts.
 
@@ -329,6 +348,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pip check
 python -m compileall -q .
 pytest -q
+(cd .. && python -m pytest -q scripts/tests)
 pip-audit -r requirements.txt
 pip-audit -r requirements-dev.txt
 
@@ -403,18 +423,21 @@ python3 -m pytest -q scripts/tests
 
 ### Forecasting database
 
-Migration 3 adds `forecast_demand_history`, `forecast_results`,
-`forecast_runs`, `product_reorder_settings`, `forecast_m5_mappings`, and
-`forecast_m5_imports`. It reuses NovaLedger’s existing `products` table and
-adds one shared `warehouses` master. Forecast tables use InnoDB, foreign keys,
-nonnegative quantity checks, and product/warehouse/date uniqueness. Migration
-5 isolates legacy M5 records from operational inventory, migration 6 records
-forecast request parameters, migration 7 lets comparison runs save predictions
-from several models for the same product, warehouse, and date, and migration 8
-adds immutable per-series metric reports for fixed M5 benchmark evaluations.
-Migration 9 adds decimal-safe batch balances and outbound allocations, and
+Migration 3 adds `warehouses`, `forecast_runs`, `forecast_m5_mappings`,
+`forecast_demand_history`, `forecast_results` (unique per run, series, date,
+and model), `forecast_evaluation_metrics`, and `product_reorder_settings`. It
+reuses NovaLedger’s existing `products` table. Forecast tables use InnoDB,
+foreign keys, nonnegative quantity checks, and product/warehouse/date
+uniqueness. Migration 4 adds the `is_forecast_test` markers, the
+`forecast_m5_imports` audit table, and high-volume indexes. Migration 5
+isolates legacy M5 records from operational inventory, and migration 6 records
+forecast request parameters. Migrations 7 and 8 bring databases created before
+those tables existed up to the same per-model key and metrics table that
+migration 3 now creates directly.
+Migration 9 adds decimal-safe batch balances and outbound allocations,
 migration 10 marks the batch-tracking cutover so historic shipments cannot be
-allocated against newly tracked lot balances.
+allocated against newly tracked lot balances, and migration 11 indexes lot
+traceability queries.
 
 New outbound dispatches must select a real active warehouse. The shipment,
 stock decrement, stock movement, and daily `WMS` demand are written in one
@@ -429,6 +452,20 @@ Each accepted outbound-import row is an independent dispatch. Until the input
 contract includes a stable external dispatch-line ID, do not retry a partially
 successful file wholesale: `so_ref` is not a safe idempotency key, so re-send
 only the corrected or unprocessed rows reported by the response.
+
+Product, inbound, and outbound imports share these rules. Header names are
+case-insensitive, so a product CSV from `GET /v1/products/export` can be edited
+and imported again. CSV files must be UTF-8; a file that cannot be parsed is
+rejected with HTTP 400. Blank rows are skipped. A row that names a product,
+supplier, or customer matching more than one record is rejected; use the SKU
+instead. If MySQL aborts the import transaction (a deadlock, a lock-wait
+timeout, or a lost connection), the API returns HTTP 409 and no rows from that
+file are saved, so the whole file can be retried.
+
+Shipment dates (`dispatch_date`, `received_date`) are calendar dates in the
+user's time zone. The API rejects only dates that have not yet started
+anywhere in the world (later than today in UTC+14), so same-day shipments work
+for users east of UTC. When the date is omitted, the UTC date is used.
 
 Administrators can create or deactivate real warehouses from the
 Administration → Warehouses page or through `/v1/warehouses`. M5 test warehouses do not appear
@@ -554,17 +591,26 @@ is a bounded sample rather than the full M5 catalog.
 `POST /v1/forecasts/runs/{run_id}/stockout-predictions` converts a successful
 run's daily predictions into product-level remaining-stock paths, first
 stockout dates, risk bands, and reorder recommendations. WMS projections use
-the current `products.quantity` balance and saved `product_reorder_settings`
+the current stock that can ship: `products.quantity`, or for batch-tracked
+products the sum of unexpired, available lots in active warehouses (the same
+basis as the low-stock alerts). Saved `product_reorder_settings` apply
 where available; request-level fallback lead time and safety stock can be
 changed for each projection. The default risk cutoffs are critical through 3
 days, high through 7, warning through 14, and healthy beyond 14. They are
-configurable in the request and in the Forecasts screen.
+configurable in the request and in the Forecasts screen. Any horizon of at
+least one future day can be projected. A stockout inside the horizon gets its
+risk band; a product with no stockout is `healthy` only when the horizon is
+longer than the warning cutoff, and `unrated` otherwise. The projection
+cutoff is the day before the first forecast date, which for comparison and
+benchmark runs is the end of the training period.
 
 This application currently stores inventory quantity at product level, not by
 warehouse. The projection therefore sums the selected run's daily demand across
 its warehouses and compares it with that product-wide balance. It uses only
-future forecast dates relative to today for WMS stock. Bounded forecast samples
-are flagged because excluded warehouses can understate demand.
+future forecast dates relative to today for WMS stock. Projections from a
+capped series sample are flagged because excluded warehouses can understate
+demand. The ARIMA fit cap does not set this flag, because capped series still
+receive fallback predictions.
 
 M5 contains demand but no on-hand balances, so an M5 projection requires an
 explicit `simulated_starting_stock` and is labeled as a development scenario.
@@ -583,27 +629,36 @@ request shape for both sources, for example
 `{"source":"WMS","model":"rolling_average","horizon_days":28}`; set
 `source` to `M5` for development experiments. `model` accepts
 `rolling_average` or `arima`. Product forecast listings require `model_name`
-when the selected run contains multiple model outputs. Alerts keep current
-low-stock results available and return a forecast warning if a multi-model
-WMS run needs an explicit `model_name`.
+when the selected run contains multiple model outputs. Without a `run_id`,
+product listings and alerts use the newest successful rolling-average or ARIMA
+run; comparison and M5 benchmark runs are only read when selected by `run_id`.
+Alerts keep current low-stock results available and report a forecast warning
+when the projection cannot be built.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | GET | `/api/forecast/overview?source=WMS` | Run counts and latest forecast coverage |
-| GET | `/api/forecast/products?source=WMS` | Product level demand totals for the latest successful run, or a selected `run_id` (defaults to WMS) |
+| GET | `/api/forecast/products?source=WMS` | Product level demand totals for the latest successful forward run, or a selected `run_id` (defaults to WMS) |
 | GET | `/api/forecast/products/{id}?source=WMS` | Daily forecast rows and summary for one product (defaults to WMS) |
 | POST | `/api/forecast/run` | Start an M5 or WMS forecast with a shared request shape |
 | GET | `/api/forecast/runs?source=WMS` | Forecast execution history |
-| GET | `/api/forecast/alerts` | Current WMS low-stock products, plus forecast risk alerts when a usable WMS run exists |
+| GET | `/api/forecast/alerts` | Current WMS low-stock products, plus forecast risk alerts from the latest forward WMS run |
 | PUT | `/api/products/{id}/reorder-settings` | Save lead time, safety stock, and review period for a product at one warehouse |
 
-The product reorder settings body requires a `warehouse_id`; reorder policy is
-stored per product and warehouse. Forecast alerts use the live product
-`quantity` and `low_stock` values. When a successful WMS run contains enough
-future dates, the same response also includes products in critical, high, or
-warning risk bands and products below their reorder point. The existing
+The same endpoints are also available under `/v1/forecasts` (for example
+`/v1/forecasts/alerts`). The product reorder settings body requires a
+`warehouse_id`; reorder policy is stored per product and warehouse. Forecast
+alerts use the live `low_stock` threshold and the stock that can ship, as in
+stockout projections. When the latest forward WMS run has future dates, the
+same response also includes products in critical, high, or warning risk bands
+and products below their reorder point. The existing
 `/api/forecast/runs/{run_id}/stockout-predictions` endpoint returns the full
 daily stock path and accepts optional dated receipts.
+
+A run that is still `running` when its API process stops (for example, a
+container restart) is marked `failed` the next time the API starts. Each run
+holds a MySQL named lock while it works, so runs owned by another live API
+process are left alone.
 
 Example reorder-settings body:
 
@@ -881,13 +936,18 @@ python3 scripts/seed_m5_sample_batches.py --count 10 --apply
 | GET    | `/v1/forecasts/runs` | List forecasting runs |
 | GET    | `/v1/forecasts/runs/{run_id}/results` | List predictions for a run, optionally filtered by product or warehouse |
 | GET    | `/v1/forecasts/runs/{run_id}/evaluation` | List per-product, warehouse, and model metrics for a fixed M5 evaluation |
+| POST   | `/v1/forecasts/run` | Start a rolling-average or ARIMA run with one shared request shape |
+| GET    | `/v1/forecasts/overview` | Run counts and the latest forecast's coverage |
+| GET    | `/v1/forecasts/products` | Product demand totals for the latest forward run, or a selected `run_id` |
+| GET    | `/v1/forecasts/products/{product_id}` | Daily forecast rows for one product |
+| GET    | `/v1/forecasts/alerts` | Live low-stock products plus forecast stockout risk |
 
 ### Attachments — `/v1/attachments`
 
 | Method | Endpoint | Description |
 | ------ | -------- | ----------- |
 | GET    | `/v1/attachments/{attachment_id}` | Download an attachment |
-| DELETE | `/v1/attachments/{attachment_id}` | Delete an attachment |
+| DELETE | `/v1/attachments/{attachment_id}` | Delete an attachment (requires the shipment module's delete permission) |
 
 ### Administration — `/v1/admin`
 

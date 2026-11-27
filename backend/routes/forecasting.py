@@ -6,8 +6,9 @@ from typing import Literal, Optional
 import zlib
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 
-from database import get_db
+from database import forecast_run_lock_name, get_db
 from forecasting_models import (
     ARIMA_MIN_HISTORY_DAYS,
     ARIMA_MIN_NONZERO_DAYS,
@@ -106,17 +107,42 @@ def _eligible_records(source: str) -> str:
 
 
 def _mark_run_failed(conn, run_id: int, message: str) -> None:
+    sql = (
+        "UPDATE forecast_runs SET status='failed', completed_at=UTC_TIMESTAMP(), "
+        "error_message=? WHERE id=?"
+    )
+    params = (message[:2000], run_id)
     try:
         conn.rollback()
-        conn.execute(
-            "UPDATE forecast_runs SET status='failed', completed_at=UTC_TIMESTAMP(), "
-            "error_message=? WHERE id=?",
-            (message[:2000], run_id),
-        )
+        conn.execute(sql, params)
         conn.commit()
+        return
     except Exception:
-        conn.rollback()
+        logger.warning(
+            "Could not mark forecast run %s as failed on its own connection",
+            run_id,
+            exc_info=True,
+        )
+    # The run's connection may be broken (for example, MySQL dropped it during
+    # a long fit). Record the failure on a fresh connection instead.
+    try:
+        fresh = get_db()
+        try:
+            fresh.execute(sql, params)
+            fresh.commit()
+        finally:
+            fresh.close()
+    except Exception:
         logger.exception("Could not mark forecast run %s as failed", run_id)
+
+
+def _claim_forecast_run(conn, run_id: int) -> None:
+    """Hold a named lock for the run's lifetime; MySQL drops it with the connection.
+
+    Call before committing the new 'running' row, so the row is never visible
+    without its owner. Startup recovery fails runs whose lock has no holder.
+    """
+    conn.execute("SELECT GET_LOCK(?, 0)", (forecast_run_lock_name(run_id),))
 
 
 def _acquire_m5_import_lock(conn, source: str) -> bool:
@@ -673,6 +699,7 @@ def run_rolling_average(
             (MODEL_NAME, request.source, _serialize_run_parameters(request)),
         )
         run_id = int(cur.lastrowid)
+        _claim_forecast_run(conn, run_id)
         conn.commit()
 
         m5_lock_acquired = _acquire_m5_import_lock(conn, request.source)
@@ -824,6 +851,7 @@ def run_arima_forecast(
             (ARIMA_MODEL_NAME, request.source, _serialize_run_parameters(request)),
         )
         run_id = int(cur.lastrowid)
+        _claim_forecast_run(conn, run_id)
         conn.commit()
 
         m5_lock_acquired = _acquire_m5_import_lock(conn, request.source)
@@ -1118,8 +1146,11 @@ def _resolve_successful_forecast_run(conn, run_id, source):
                 detail=f"Forecast run {run_id} uses source {run['source']}, not {source}.",
             )
     else:
-        where = "WHERE status='success'"
-        params = []
+        # Default to the newest forward forecast. Comparison and benchmark runs
+        # hold several models over historical holdout dates, so they are only
+        # used when requested by run_id.
+        where = "WHERE status='success' AND model_name IN (?, ?)"
+        params = [MODEL_NAME, ARIMA_MODEL_NAME]
         if source is not None:
             where += " AND source=?"
             params.append(source)
@@ -1132,11 +1163,14 @@ def _resolve_successful_forecast_run(conn, run_id, source):
         ).fetchone()
         if run is None:
             detail = (
-                f"No successful {source} forecast run is available."
+                f"No successful {source} rolling-average or ARIMA forecast run is available."
                 if source
-                else "No successful forecast run is available."
+                else "No successful rolling-average or ARIMA forecast run is available."
             )
-            raise HTTPException(status_code=404, detail=detail)
+            raise HTTPException(
+                status_code=404,
+                detail=f"{detail} Pass run_id to read a comparison or benchmark run.",
+            )
 
     if run["status"] != "success":
         raise HTTPException(
@@ -1457,7 +1491,7 @@ def start_forecast(
 @compat_router.get("/alerts")
 @router.get("/alerts")
 def list_forecast_alerts(
-    model_name: Optional[str] = Query(default=None, min_length=1, max_length=64),
+    model_name: Optional[str] = Query(default=None, min_length=1, max_length=50),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_permission("reports", "read")),
@@ -1495,10 +1529,14 @@ def list_forecast_alerts(
             """,
             (limit, offset),
         ).fetchall()
+        # Only forward forecasts project future stock. Comparison runs cover
+        # past holdout dates and would hide the alerts until another run.
         latest_run = conn.execute(
             "SELECT id, model_name, started_at, completed_at "
             "FROM forecast_runs WHERE source='WMS' AND status='success' "
-            "ORDER BY completed_at DESC, id DESC LIMIT 1"
+            "AND model_name IN (?, ?) "
+            "ORDER BY completed_at DESC, id DESC LIMIT 1",
+            (MODEL_NAME, ARIMA_MODEL_NAME),
         ).fetchone()
         forecast_alerts = None
         forecast_warning = None
@@ -1555,6 +1593,11 @@ def list_forecast_alerts(
                 }
             except HTTPException as exc:
                 forecast_warning = exc.detail
+            except (ValidationError, ValueError) as exc:
+                # Keep the live low-stock list available when a projection
+                # cannot be built from the saved run.
+                logger.warning("Forecast alert projection failed", exc_info=True)
+                forecast_warning = str(exc)
         return {
             "source": "WMS",
             "alert_basis": (
@@ -1606,6 +1649,7 @@ def compare_forecast_models(
             ),
         )
         run_id = int(cur.lastrowid)
+        _claim_forecast_run(conn, run_id)
         conn.commit()
 
         m5_lock_acquired = _acquire_m5_import_lock(conn, request.source)
@@ -2053,6 +2097,7 @@ def run_m5_evaluation(
             ),
         )
         run_id = int(cur.lastrowid)
+        _claim_forecast_run(conn, run_id)
         conn.commit()
 
         m5_lock_acquired = _acquire_m5_import_lock(conn, "M5")
@@ -2573,20 +2618,26 @@ def project_forecast_stockouts(
                 status_code=409,
                 detail="The forecast run does not contain a valid horizon.",
             ) from exc
-        as_of_value = parameters.get("resolved_as_of_date") or parameters.get("as_of_date")
-        if not as_of_value and parameters.get("evaluation_protocol"):
-            as_of_value = parameters["evaluation_protocol"].get("training_end")
 
+        # Batch-tracked stock includes blocked, expired, and inactive-site lots
+        # that cannot ship. Project from the lots that can, like the alerts.
         rows = conn.execute(
             f"""
             SELECT r.product_id, p.sku, p.name AS product_name,
-                   p.quantity AS available_stock, p.is_forecast_test,
+                   CASE WHEN p.batch_tracking_enabled_at IS NOT NULL
+                        THEN COALESCE(batch_available.available_stock, 0)
+                        ELSE p.quantity
+                   END AS available_stock,
+                   p.batch_tracking_enabled_at IS NOT NULL AS uses_batch_stock,
+                   p.is_forecast_test,
                    r.warehouse_id, w.warehouse_code, w.name AS warehouse_name,
                    r.forecast_date, r.predicted_demand,
                    s.lead_time_days, s.safety_stock
             FROM forecast_results r
             JOIN products p ON p.id=r.product_id
             JOIN warehouses w ON w.id=r.warehouse_id
+            LEFT JOIN ({_operational_usable_batch_stock_sql()}) batch_available
+              ON batch_available.product_id=p.id
             LEFT JOIN product_reorder_settings s
               ON s.product_id=r.product_id AND s.warehouse_id=r.warehouse_id
             WHERE r.run_id=? {model_filter}
@@ -2610,6 +2661,7 @@ def project_forecast_stockouts(
                     "sku": row["sku"],
                     "product_name": row["product_name"],
                     "available_stock": float(row["available_stock"]),
+                    "uses_batch_stock": bool(row.get("uses_batch_stock")),
                     "is_forecast_test": bool(row["is_forecast_test"]),
                     "warehouses": {},
                     "settings": {},
@@ -2676,19 +2728,14 @@ def project_forecast_stockouts(
                         "Generate a new WMS forecast before projecting stockouts."
                     ),
                 )
-        elif as_of_value:
-            as_of_date = date.fromisoformat(as_of_value)
         else:
+            # The cutoff is the day before the first predicted date. For forward
+            # runs that is the as-of date; for comparison and benchmark runs it
+            # is the end of training, not the end of the holdout.
             as_of_date = ordered_dates[0] - timedelta(days=1)
 
-        if len(ordered_dates) <= request.warning_max_days:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"At least {request.warning_max_days + 1} future forecast days are "
-                    "required to classify healthy stock."
-                ),
-            )
+        # Short horizons are allowed: a stockout inside the horizon still gets
+        # its risk band, and products without one are reported as "unrated".
 
         replenishments_by_product = {}
         receipt_details_by_product = {}
@@ -2745,7 +2792,11 @@ def project_forecast_stockouts(
                 inventory_source = "simulated"
             else:
                 available_stock = product["available_stock"]
-                inventory_source = "products.quantity"
+                inventory_source = (
+                    "available batch stock"
+                    if product["uses_batch_stock"]
+                    else "products.quantity"
+                )
 
             warehouse_settings = product["settings"]
             missing_settings = len(product["warehouses"]) - len(warehouse_settings)
@@ -2822,12 +2873,16 @@ def project_forecast_stockouts(
             "uses_live_inventory": run["source"] == "WMS",
             "has_purchase_order_source": False,
             "assumptions": {
-                "wms_stock_basis": "products.quantity is shared across warehouses; demand is aggregated across this run's forecast warehouses.",
-                "incoming_receipts": "Projection-only dates and quantities supplied in this request; this app does not store open purchase orders.",
-                "series_sample_truncated": bool(
-                    parameters.get("series_sample_truncated")
-                    or parameters.get("arima_sample_truncated")
+                "wms_stock_basis": (
+                    "Stock is product-wide and demand is summed across this run's "
+                    "forecast warehouses. Batch-tracked products use unexpired, "
+                    "available lots in active warehouses; other products use "
+                    "products.quantity."
                 ),
+                "incoming_receipts": "Projection-only dates and quantities supplied in this request; this app does not store open purchase orders.",
+                # Only a capped series sample leaves demand out. The ARIMA fit
+                # cap does not: capped series still get fallback predictions.
+                "series_sample_truncated": bool(parameters.get("series_sample_truncated")),
                 "default_lead_time_days": request.default_lead_time_days,
                 "default_safety_stock": request.default_safety_stock,
                 "risk_thresholds": {
