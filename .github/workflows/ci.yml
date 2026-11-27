@@ -32,7 +32,7 @@ jobs:
     env:
       DATABASE_URL: mysql://novaledger:novaledger@127.0.0.1:3306/novaledger_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -56,7 +56,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -78,7 +78,7 @@ jobs:
       BACKEND_PORT: 18000
       FRONTEND_PORT: 15173
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose -p novaledger-ci up --build -d --wait --wait-timeout 120
       - run: curl --fail --silent --show-error http://localhost:15173/health
       - run: docker compose -p novaledger-ci exec -T --user 10001:10001 backend sh -c 'test -w /data && test -w /data/uploads && test ! -w /app'
